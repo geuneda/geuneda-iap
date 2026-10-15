@@ -122,7 +122,6 @@ namespace Geuneda.Iap.Server
 				PurchasedAt = FromMilliseconds(transaction.PurchaseDate),
 				ExpiresAt = expiresAt,
 				SubscriptionState = state,
-				ObservedAt = transaction.SignedDate is { } signedAt ? DateTimeOffset.FromUnixTimeMilliseconds(signedAt) : _time.GetUtcNow(),
 				IsTest = transaction.Environment == Sandbox,
 				AccountToken = string.IsNullOrEmpty(transaction.AppAccountToken) ? null : transaction.AppAccountToken,
 				PaidAmount = hasPrice ? transaction.Price.Value / 1000m : null,

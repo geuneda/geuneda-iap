@@ -108,7 +108,7 @@ namespace Geuneda.Iap.Server
 				var record = await _ledger.FindAsync(IapStoreNames.AppleAppStore, transaction.TransactionId, cancellationToken);
 				var reversed = payload.NotificationType == RefundReversed;
 				var quantity = record?.Quantity ?? Math.Max(1, transaction.Quantity ?? 1);
-				await _refunds.ApplyAsync(new RefundChange
+				var refundOutcome = await _refunds.ApplyAsync(new RefundChange
 				{
 					Store = IapStoreNames.AppleAppStore,
 					TransactionId = transaction.TransactionId,
@@ -119,6 +119,14 @@ namespace Geuneda.Iap.Server
 					StoreProductId = transaction.ProductId,
 					Quantity = quantity
 				}, payload.NotificationType, cancellationToken);
+
+				if (reversed && refundOutcome == LedgerRefundOutcome.RecordedBeforeGrant)
+				{
+					// 모두 환불된 결제의 지급 요청은 계정을 기록하지 않고 닫으므로(Revoked) 돌려줄 계정을 모른다. 아직 지급 요청 전이면 그 요청이 지급한다
+					_logger.LogWarning("App Store reversed the refund of transaction {TransactionId} ({ProductId}) that was never granted. If the client already " +
+					                   "closed it as refunded, grant it through support (the 'Closed ... without granting' warning names the account)", transaction.TransactionId,
+						transaction.ProductId);
+				}
 			}
 
 			if (renewal == null && product?.Type != IapProductType.Subscription)
@@ -133,17 +141,22 @@ namespace Geuneda.Iap.Server
 				return NotificationOutcome.RetryLater;
 			}
 
+			if (transaction.PurchaseDate == null)
+			{
+				// 구매 시각이 결제 기간의 기준이다. 없으면 오래된 알림으로 버려지므로(받은 시각으로 대신하면 옛 거래가 최신 기간이 됨) 상태를 바꾸지 않고 Apple 이 다시 보내게 한다
+				_logger.LogError("App Store notification {Type} has a subscription transaction {TransactionId} without purchaseDate; Apple will retry", payload.NotificationType,
+					transaction.TransactionId);
+				return NotificationOutcome.RetryLater;
+			}
+
 			var subscriptionId = string.IsNullOrEmpty(transaction.OriginalTransactionId) ? transaction.TransactionId : transaction.OriginalTransactionId;
 
-			// 원래 거래 ID 로 지급한 기록(처음 거래든 갱신 거래든, 가장 최근 것)에서 계정을 찾는다. 없으면 앞서 저장된 상태의 계정을 쓴다
-			var owner = await _ledger.FindByOriginalTransactionAsync(IapStoreNames.AppleAppStore, subscriptionId, cancellationToken);
 			var update = new SubscriptionUpdate
 			{
 				Store = IapStoreNames.AppleAppStore,
 				SubscriptionId = subscriptionId,
 				StoreProductId = transaction.ProductId,
 				Product = product,
-				AccountId = owner?.AccountId,
 				State = SubscriptionState(data.Status, transaction, renewal),
 				ExpiresAt = transaction.ExpiresDate is { } expires ? DateTimeOffset.FromUnixTimeMilliseconds(expires) : null,
 				GracePeriodExpiresAt = renewal?.GracePeriodExpiresDate is { } grace ? DateTimeOffset.FromUnixTimeMilliseconds(grace) : null,
@@ -151,16 +164,28 @@ namespace Geuneda.Iap.Server
 				IsTest = data.Environment == AppStoreVerifier.Sandbox,
 				NotificationType = string.IsNullOrEmpty(payload.Subtype) ? payload.NotificationType : payload.NotificationType + ":" + payload.Subtype,
 				ObservedAt = observedAt,
+				PeriodStartedAt = DateTimeOffset.FromUnixTimeMilliseconds(transaction.PurchaseDate.Value),
 				LatestTransactionId = transaction.TransactionId
 			};
-			var delivered = await _ledger.UpdateSubscriptionAsync(IapStoreNames.AppleAppStore, subscriptionId,
-				(stored, _) => Task.FromResult(update.AccountId != null || stored?.AccountId == null ? update : update with { AccountId = stored.AccountId }),
-				_handler.OnSubscriptionChangedAsync, cancellationToken);
-
-			if (delivered == SubscriptionUpdateOutcome.Stale)
+			await _ledger.UpdateSubscriptionAsync(IapStoreNames.AppleAppStore, subscriptionId, async (stored, ct) =>
 			{
-				_logger.LogInformation("Ignored an older App Store subscription state for {SubscriptionId} ({Type})", subscriptionId, payload.NotificationType);
-			}
+				// 소유 계정은 스냅숏이 정한다(구독 지급이 구독 잠금 안에서 정함). 스냅숏에 계정이 없을 때만 원래 거래 ID 로 지급한 가장 최근 기록에서 찾는다
+				// (지급 시작 시각 순인 원장 조회로 잠금 순서인 소유자를 덮지 않게)
+				var owner = stored?.AccountId == null ? await _ledger.FindByOriginalTransactionAsync(IapStoreNames.AppleAppStore, subscriptionId, ct) : null;
+				var merged = SubscriptionMerge.ByPeriod(stored, update with
+				{
+					AccountId = stored?.AccountId ?? owner?.AccountId,
+					AccountPeriodStartedAt = stored?.AccountId != null ? stored.AccountPeriodStartedAt : owner?.PurchasedAt
+				}, false);
+
+				if (merged == null)
+				{
+					_logger.LogInformation("Ignored an older App Store subscription state for {SubscriptionId} ({Type}, transaction {TransactionId})", subscriptionId,
+						payload.NotificationType, transaction.TransactionId);
+				}
+
+				return merged;
+			}, _handler.OnSubscriptionChangedAsync, cancellationToken);
 
 			return NotificationOutcome.Processed;
 		}

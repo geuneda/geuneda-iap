@@ -296,6 +296,8 @@ public sealed class ShopGrantor : IPurchaseGrantor
 		// 원장 트랜잭션 안. 여기서 쓴 것은 원장 기록과 함께 커밋되거나 함께 롤백됩니다
 		// grant.Quantity: 지급할 수량(지급 요청 전에 일부가 환불됐으면 그만큼 적음)
 		var rewards = await _db.GiveAsync(grant.AccountId, grant.Product.Id, grant.Quantity, cancellationToken);
+
+		// 구독 권한은 여기서 쓰지 않습니다. 서버 알림을 쓰면 서버가 이 트랜잭션 안에서 합친 구독 스냅숏을 처리기에 넘깁니다(아래 '구독 권한')
 		return GrantResult.Granted(new ShopGrant { Rewards = rewards });
 	}
 }
@@ -304,13 +306,13 @@ public sealed class ShopGrantor : IPurchaseGrantor
 처리 순서(`IPurchaseRedeemer`, HTTP 밖에서 직접 부를 수도 있음):
 
 1. 요청 검사(스토어, 상품 목록, 거래 ID). 서버 상품 목록에 없는 상품은 거절합니다.
-2. 원장 확인. 이미 기록한 거래면 스토어를 부르지 않고 답합니다. 같은 계정이면 처음 지급 응답과 함께 `Duplicate`, 다른 계정이면 지급 없이 `OwnedByOtherAccount`(둘 다 `AlreadyGranted` 라 클라이언트가 거래를 닫음).
+2. 원장 확인. 지급 기록이 있으면 스토어를 부르지 않고 답합니다. 같은 계정이면 처음 지급 응답과 함께 `Duplicate`, 다른 계정이면 지급 없이 `OwnedByOtherAccount`(둘 다 `AlreadyGranted` 라 클라이언트가 거래를 닫음). 계정 없는 지급 전 환불 기록(아래 서버 알림)뿐이면 검증으로 넘어갑니다.
 3. 스토어 검증.
 4. 원장 트랜잭션 안에서 지급자를 부르고, 지급했으면 지급 응답과 함께 기록해 커밋합니다. 같은 거래의 동시 요청은 원장이 하나만 통과시킵니다.
 5. Google 은 지급을 기록한 뒤 결제를 확인(acknowledge)합니다(`AcknowledgeAfterGrant`, 기본 켜짐). 클라이언트가 확정하기 전에 앱이 지워져도 3일 자동 환불이 일어나지 않습니다. 소비는 하지 않습니다(서버가 소비하면 클라이언트 확정이 '구매 없음'으로 실패).
    확인할 결제(Google 이 '확인됨'이라고 분명히 답하지 않은 모든 결제)는 지급과 같은 트랜잭션에서 원장에 다음 시도 시각(`PurchaseRecord.AcknowledgementDueAt`)으로 남습니다. 커밋 직후 확인이 실패하거나 그 사이 서버가 죽어도, 확인 작업자(호스트 서비스)가 시작할 때와 `AcknowledgementRetryInterval`(기본 5분)마다 시각이 된 기록을 모두 다시 확인합니다(실패한 기록은 다음 간격 뒤로 미뤄 뒤의 기록을 막지 않음). 확인이 거절되면 결제 상태를 다시 읽어 이미 확인·소비·취소됐으면 끝내고, 결제 뒤 3일이 지나면 Error 로그를 남기고 그만둡니다.
 
-원장(`IPurchaseLedger`)은 게임 DB 로 구현합니다. (Store, TransactionId) 에 유일 제약을 둔 거래 표와 (Store, SubscriptionId) 키의 구독 표를 둡니다. 지급은 한 트랜잭션에서 (1) 지급 기록이 있으면 `Duplicate`, (2) 없으면 지급 콜백(지급자의 쓰기도 이 트랜잭션 안, 인자는 지급 전 환불 기록이 있으면 그것), (3) 지급했으면 기록 추가(지급 전 환불 기록이 있었으면 그 행을 지급 기록으로 바꾸고 환불 수량·시각은 유지) 후 커밋합니다. 동시 요청이 유일 제약에 걸리면 지급까지 함께 롤백하고 처음부터 다시 합니다. 확인 대기 기록 조회(`FindDueAcknowledgementsAsync(now, limit)`, 시각 순), 표시 해제(`MarkAcknowledgedAsync`), 미루기(`DeferAcknowledgementAsync`, 이미 해제된 기록은 되돌리지 않음)도 구현합니다(`AcknowledgementDueAt` 에 색인). 서버 알림을 쓰면 환불 수량 변경(`UpdateRefundAsync(RefundChange)`: 기록이 없으면 계정 없는 지급 전 환불 기록을 넣고 `RecordedBeforeGrant`, `EventOrdered` 면 이벤트가 마지막 변경보다 이를 때 `Stale`·수량이 같으면 시각만 앞당기고 `Unchanged`, `NeverDecrease` 면 기록과 새 값 중 큰 값, 지급 기록의 수량이 바뀌면 같은 트랜잭션에서 콜백 후 기록), 원래 거래 ID 로 찾기(`FindByOriginalTransactionAsync`, 지급 기록만, `OriginalTransactionId` 에 색인), 구독 상태(`UpdateSubscriptionAsync`: 구독 행을 잠근 채 저장된 상태로 다음 상태를 만들고, 그 관측 시각이 저장된 것보다 이르면 `Stale`, 아니면 처리기 호출 후 저장)도 구현합니다. 기존 행을 고치는 이 메서드들은 유일 제약만으로는 동시 처리를 막지 못합니다. 트랜잭션 안에서 그 행을 잠그고(없으면 넣고 잠금) 다시 읽어 비교·콜백·저장하거나, 버전 열 조건부 갱신이 실패하면 게임 쓰기까지 전부 롤백하고 다시 하세요. 구독 잠금은 여러 서버에 걸쳐야 하므로 DB 에 둡니다(Google 은 그 안에서 조회). 확인 표시와 환불 갱신은 서로의 열을 덮어쓰지 않아야 합니다. 지급자와 원장이 같은 요청 범위 DB 컨텍스트·세션을 받게 등록합니다. App Store 와 Mac App Store 는 거래 ID 공간이 같아 원장 스토어는 `AppleAppStore` 하나입니다(`IStoreVerifier.LedgerStore`).
+원장(`IPurchaseLedger`)은 게임 DB 로 구현합니다. (Store, TransactionId) 에 유일 제약을 둔 거래 표와 (Store, SubscriptionId) 키의 구독 표를 둡니다. 지급은 한 트랜잭션에서 (1) 지급 기록이 있으면 `Duplicate`, (2) 없으면 지급 콜백(지급자의 쓰기도 이 트랜잭션 안, 인자는 지급 전 환불 기록이 있으면 그것), (3) 지급했으면 기록 추가(지급 전 환불 기록이 있었으면 그 행을 지급 기록으로 바꾸고 환불 수량·시각은 유지) 후 커밋합니다. 동시 요청이 유일 제약에 걸리면 지급까지 함께 롤백하고 처음부터 다시 합니다. 확인 대기 기록 조회(`FindDueAcknowledgementsAsync(now, limit)`, 시각 순), 표시 해제(`MarkAcknowledgedAsync`), 미루기(`DeferAcknowledgementAsync`, 이미 해제된 기록은 되돌리지 않음)도 구현합니다(`AcknowledgementDueAt` 에 색인). 서버 알림을 쓰면 환불 수량 변경(`UpdateRefundAsync(RefundChange)`: 기록이 없으면 계정 없는 지급 전 환불 기록을 넣고 `RecordedBeforeGrant`, `EventOrdered` 면 이벤트가 마지막 변경보다 이를 때 `Stale`·수량이 같으면 시각만 앞당기고 `Unchanged`, `NeverDecrease` 면 기록과 새 값 중 큰 값, 지급 기록의 수량이 바뀌면 같은 트랜잭션에서 콜백 후 기록), 원래 거래 ID 로 찾기(`FindByOriginalTransactionAsync`, 지급 기록만, `OriginalTransactionId` 에 색인), 구독 스냅숏(`UpdateSubscriptionAsync`: 구독 행을 잠근 채 저장된 스냅숏으로 콜백을 부르고, 돌려받은 것이 null 이면 아무것도 하지 않고, 아니면 처리기 호출 후 저장. 순서·합치기는 콜백이 정하므로 원장은 비교하지 않음. 구독 지급은 지급 콜백 안에서 부르므로 지급 트랜잭션에 참여하고, 잠금 순서는 언제나 거래 행 → 구독 행. 지급 콜백 안에서 시작한 원장 작업은 콜백이 돌아가기 전에 모두 기다려야 함)도 구현합니다. 기존 행을 고치는 이 메서드들은 유일 제약만으로는 동시 처리를 막지 못합니다. 트랜잭션 안에서 그 행을 잠그고(없으면 넣고 잠금) 다시 읽어 비교·콜백·저장하거나, 버전 열 조건부 갱신이 실패하면 게임 쓰기까지 전부 롤백하고 다시 하세요. 구독 잠금은 여러 서버에 걸쳐야 하므로 DB 에 둡니다(Google 은 그 안에서 조회). 확인 표시와 환불 갱신은 서로의 열을 덮어쓰지 않아야 합니다. 지급자와 원장이 같은 요청 범위 DB 컨텍스트·세션을 받게 등록합니다. App Store 와 Mac App Store 는 거래 ID 공간이 같아 원장 스토어는 `AppleAppStore` 하나입니다(`IStoreVerifier.LedgerStore`).
 
 검증 규칙:
 
@@ -385,19 +387,22 @@ public sealed class ShopNotifications : IPurchaseNotificationHandler
 	// App Store 가 분쟁 뒤 환불을 취소함
 	public Task OnRefundReversedAsync(PurchaseRefund refund, CancellationToken ct) => _db.GiveAsync(refund.AccountId, refund.Product.Id, refund.Quantity, ct);
 
-	// 구독 권한. 원장이 구독마다 순서를 지켜 넘기므로 받은 순서대로 반영. AccountId 가 null(지급 전)이어도 SubscriptionId 로 저장
-	public Task OnSubscriptionChangedAsync(SubscriptionUpdate update, CancellationToken ct) => _db.SetSubscriptionAsync(update, ct);
+	// 구독 권한(아래 '구독 권한'). 서버가 합친 스냅숏을 구독 ID 로 그대로 저장. 구독 지급 때는 지급 트랜잭션 안에서 옴
+	public Task OnSubscriptionChangedAsync(SubscriptionUpdate update, CancellationToken ct) => _db.SaveSubscriptionAsync(update, ct);
 }
 ```
 
 - **환불은 누적 수량으로 한 번만 반영합니다.** 원장의 `PurchaseRecord.RefundedQuantity` 를 스토어가 알려 준 누적 환불 수량으로 맞추고(`IPurchaseLedger.UpdateRefundAsync`, 한 트랜잭션), 늘어난 만큼 `OnRefundedAsync`, 줄어든 만큼 `OnRefundReversedAsync` 를 부릅니다. 같은 알림이 다시 오면 수량이 같아 부르지 않습니다. 순서는 스토어마다 다르게 정합니다. App Store 는 서명된 이벤트라 이벤트 시각 순(`EventOrdered`: 마지막 반영보다 이른 이벤트는 무시, 수량이 같아도 늦은 이벤트면 시각을 앞당겨 먼저 온 환불 취소 뒤의 늦은 환불을 거름)이고, Google 은 서버가 조회한 지금 상태라 시각으로 거르지 않고 줄이지 않습니다(`NeverDecrease`, Google 은 환불을 취소하지 않음). 처리기가 예외를 던지면 롤백하고 500 으로 답해 스토어가 다시 보냅니다. 모두 환불된 거래가 클라이언트에서 다시 오면 지급 없이 닫습니다(`Revoked`).
-- **지급 요청보다 먼저 온 환불도 남깁니다.** 원장에 없는 거래의 환불은 계정 없는 지급 전 환불 기록(`PurchaseRecord.IsGranted` false)으로 남깁니다. 나중에 그 거래의 지급 요청이 오면 같은 트랜잭션에서 그 기록을 보고 환불된 수량만큼 빼고 지급하며(`PurchaseGrant.Quantity`), 전부 환불이면 지급 없이 닫습니다(`Revoked`). 그래서 구매 뒤 환불받고 환불 전에 받은 영수증(여전히 서명이 유효한 JWS)을 나중에 내도 지급되지 않습니다. 진행 중인 지급과 겹친 환불은 같은 거래 잠금에서 지급 커밋을 기다렸다가 회수합니다.
-- **모르는 값은 회수하지 않고 다시 받습니다.** 모르는 환불 종류·상품 종류, 구독 상태가 없거나 모르는 값, 상품 목록이 없는 Google 응답은 503 입니다(결제 대기·결제 전 취소 구독은 알릴 것이 없어 200).
+- **지급 요청보다 먼저 온 환불도 남깁니다.** 원장에 없는 거래의 환불은 계정 없는 지급 전 환불 기록(`PurchaseRecord.IsGranted` false)으로 남깁니다. 나중에 그 거래의 지급 요청이 오면 같은 트랜잭션에서 그 기록을 보고 환불된 수량만큼 빼고 지급하며(`PurchaseGrant.Quantity`), 전부 환불이면 지급 없이, 계정도 기록하지 않고 닫습니다(`Revoked`, '한계' 참고). 그래서 구매 뒤 환불받고 환불 전에 받은 영수증(여전히 서명이 유효한 JWS)을 나중에 내도 지급되지 않습니다. 진행 중인 지급과 겹친 환불은 같은 거래 잠금에서 지급 커밋을 기다렸다가 회수합니다.
+- **모르는 값은 회수하지 않고 다시 받습니다.** 모르는 환불 종류·상품 종류, 구독 상태가 없거나 모르는 값, 구매 시각(`purchaseDate`, 결제 기간의 기준)이 없는 App Store 구독 거래, 상품 목록이 없는 Google 응답은 503 입니다(결제 대기·결제 전 취소 구독은 알릴 것이 없어 200).
 - **Google:** 일회성 환불(`voidedPurchaseNotification`)의 전체 환불은 지급 수량 전부, 여러 개 구매의 일부 환불(여러 번 올 수 있음)은 지금 남은 환불 가능 수량(`refundableQuantity`)으로 누적 환불 수량을 구합니다(조회 실패는 503 으로 다시 받음). 구독 알림은 원장의 구독 잠금 안에서 알림 내용 대신 `subscriptionsv2` 로 지금 상태를 다시 읽어 넘깁니다(늦게 끝난 옛 조회가 새 상태를 덮지 못함, `ObservedAt` 은 저장된 것보다 늦은 조회 시각). `SUBSCRIPTION_REVOKED` 는 지급도 회수하고(지급 전이면 지급 전 환불 기록), 구독 결제의 환불(`voidedPurchaseNotification` 구독)은 상태만 넘깁니다(토큰 하나에 주문이 여럿이라 지급 전에는 처음 주문인지 알 수 없고, 환불 뒤에도 기간이 남을 수 있음. 철회됐으면 상태가 만료로 옴). 계정은 원장에서 찾고, 업그레이드·재가입한 새 구독이 아직 지급 요청 전이면 `linkedPurchaseToken` 의 계정을 씁니다.
-- **App Store:** 알림·거래·갱신 정보 서명을 모두 검증하고 번들 ID, 환경(`AllowSandbox`), 운영 알림의 `AppAppleId` 를 확인합니다. `REFUND`·`REVOKE` 는 거래 전체를 환불로, `REFUND_REVERSED` 는 환불 없음으로 맞춥니다. 구독 상품이면 알림의 `status`(1 이용 중, 2 만료, 3 결제 재시도, 4 결제 유예, 5 철회)와 자동 갱신 상태로 `IapSubscriptionState` 를 정해 넘기고, 결제 유예 종료 시각(`GracePeriodExpiresAt`)도 넘깁니다. 계정은 원래 거래 ID 로 지급한 가장 최근 기록에서 찾습니다(`FindByOriginalTransactionAsync`, 갱신 거래만 지급한 구독 포함).
-- **구독 상태는 원장이 순서를 지켜 넘깁니다.** 구독마다 마지막으로 넘긴 상태를 원장이 저장하고(`UpdateSubscriptionAsync`), 그보다 오래된 관측(순서가 뒤바뀐 App Store 알림)은 넘기지 않으므로 처리기는 받은 순서대로 반영하면 됩니다. 모르는 App Store `status`(1~5 밖)는 상태를 바꾸지 않고 503 입니다.
-- **구독 계정 연결(게임 몫).** 클라이언트가 지급 요청을 하기 전에 온 갱신은 `AccountId` 가 null 이고 다시 오지 않습니다. 처리기는 이것을 `SubscriptionId` 로 저장해 두고, 지급자가 `grant.Purchase.SubscriptionId` 로 그 상태를 찾아 계정에 연결하세요. 둘 중 관측 시각(`SubscriptionUpdate.ObservedAt`, `VerifiedPurchase.ObservedAt`)이 늦은 쪽을 쓰되, App Store 거래 서명의 구독 상태는 만료 시각으로만 정한 것이라(자동 갱신·유예 정보 없음) 시각이 같거나 비슷하면 알림 상태를 우선합니다. 한 구독에 계정이 바뀌면(다른 계정이 갱신 거래를 지급받음) 알림은 가장 최근에 지급받은 계정으로 옵니다.
-- **모두 환불된 거래의 지급 요청은 계정만 기록합니다.** 지급자를 부르지 않고 닫되(`Revoked`) 그 계정을 원장에 남겨, 나중에 App Store 가 환불을 취소하면(`REFUND_REVERSED`) `OnRefundReversedAsync` 로 그 계정에 돌려줄 수 있게 합니다(지급자를 거치지 않으므로 처리기가 지급합니다).
+- **App Store:** 알림·거래·갱신 정보 서명을 모두 검증하고 번들 ID, 환경(`AllowSandbox`), 운영 알림의 `AppAppleId` 를 확인합니다. `REFUND`·`REVOKE` 는 거래 전체를 환불로, `REFUND_REVERSED` 는 환불 없음으로 맞춥니다. 구독 상품이면 알림의 `status`(1 이용 중, 2 만료, 3 결제 재시도, 4 결제 유예, 5 철회)와 자동 갱신 상태로 `IapSubscriptionState` 를 정해 넘기고, 결제 유예 종료 시각(`GracePeriodExpiresAt`)도 넘깁니다. 계정은 구독 잠금 안에서 원래 거래 ID 로 지급한 가장 최근 기록에서 찾습니다(`FindByOriginalTransactionAsync`, 갱신 거래만 지급한 구독 포함).
+- **구독 권한은 서버가 합쳐 넘깁니다.** 원장의 구독 행(`UpdateSubscriptionAsync`)에 합친 권한 스냅숏(`SubscriptionUpdate`)을 두고, 서버 알림과 구독 지급을 그 구독 잠금 안에서 합쳐 바뀔 때마다 처리기에 넘깁니다. 처리기는 받은 것을 `SubscriptionId` 로 그대로 저장하면 되고, 지급자는 구독 권한을 쓰지 않습니다. 모르는 App Store `status`(1~5 밖)는 상태를 바꾸지 않고 503 입니다.
+  - 구독 지급: 지급 트랜잭션 안에서 구독 잠금을 잡고 합칩니다(그 계정이 소유자). 지급 검증의 조회는 잠금 밖이라 쓰지 않고, Google 은 잠금 안에서 다시 읽습니다. 읽지 못하면 지급까지 롤백하고 `RetryLater`(`StoreUnavailable`)로 답해 클라이언트가 다시 보내므로, 지급만 남고 권한이 빠지는 일이 없습니다.
+  - Google: 잠금 안에서 지금 상태를 다시 읽은 것이 항상 이깁니다(알림 내용, 잠금 밖 지급 조회는 쓰지 않음).
+  - App Store(가짜 스토어·사용자 정의 스토어도 지급한 거래로 같은 규칙): 거래·알림은 그 결제 기간의 것이라 기간(`PeriodStartedAt`, 거래의 구매 시각)이 뒤인 것이 이기고, 같은 기간이면 늦게 서명된 알림이 이깁니다. 만료 시각은 기준으로 쓰지 않습니다(긴 상품에서 짧은 상품으로 업그레이드하면 새 거래의 만료가 더 이름). 지급한 거래 서명에는 자동 갱신·유예 정보가 없어 뒤 기간일 때만 상태를 바꾸고(자동 갱신은 앞 스냅숏의 것), 그 밖에는 계정만 연결합니다. 그래서 갱신 거래를 지급하면 그 알림이 늦거나 오지 않아도 권한이 오르고, 늦게 오거나 다시 온 앞 기간 알림은 권한을 되돌리지 않으며 순서 기준도 바꾸지 않습니다.
+  - 계정: 스냅숏이 정합니다. 소유자를 정한 지급의 기간(`AccountPeriodStartedAt`)보다 같거나 뒤 기간의 거래를 지급받은 계정이 소유자가 되고, 앞 기간 거래를 늦게 지급하면 바뀌지 않습니다. 알림은 상태 기간만 올리고 소유자를 바꾸지 않으므로, 같은 지급들이면 알림이 언제 오든 소유자가 같습니다. 알림은 스냅숏에 계정이 없을 때만 원장에서 찾습니다(Google 은 그 토큰, 없으면 연결 토큰의 지급 기록, App Store 는 원래 거래 ID 로 지급한 가장 최근 기록). 지급 요청 전에 온 갱신은 `AccountId` 가 null 이고, 그 지급이 오면 같은 트랜잭션에서 계정을 넣은 스냅숏(`REDEEM`)이 다시 옵니다. 계정이 바뀌면(다른 계정이 뒤 기간 거래를 지급받음) 권한을 그 계정으로 옮기세요.
+  - 서버 알림을 쓰지 않으면(처리기 없음) 합치지 않습니다. 그때는 지급자가 `grant.Purchase` 의 상태·만료로 권한을 정하고, 갱신·환불은 반영되지 않습니다. 사용자 정의 검증기(`AddVerifier<T>`)는 구독 거래에 `VerifiedPurchase.SubscriptionState` 와 `PurchasedAt`(결제 기간의 시작, 기간 순서의 기준)을 채워야 합니다. 없으면 서버 알림을 쓸 때 지급자를 부르기 전에 예외(500)입니다.
 - **알림으로 지급하거나 확인하지 않습니다.** 결제 알림(`ONE_TIME_PRODUCT_PURCHASED`, `SUBSCRIPTION_PURCHASED` 등)만으로는 지급할 계정을 모르고, 지급하지 않은 결제를 확인하면 클라이언트가 끝내 지급받지 못한 결제의 Google 자동 환불(마지막 안전망)을 막게 됩니다. 지급은 클라이언트의 지급 요청으로 합니다.
 - **응답:** 200(반영·할 일 없음: 테스트 알림, 다른 앱·패키지, 이 서버가 지급하지 않은 거래), 503(스토어 API·인증서 폐기 확인 불가, 다시 보내 줌), 401(서명·토큰 검증 실패), 400(본문을 해석하지 못함 — Pub/Sub 이 보관 기간 동안 다시 보내므로 버그를 고친 뒤 받을 수 있음), 500(처리기·원장 예외).
 - **Pub/Sub 푸시 인증:** OIDC 토큰의 Google 서명(JWKS), 발급자 `accounts.google.com`, 대상(`NotificationAudience`), 만료, 서비스 계정 이메일과 이메일 확인을 봅니다(Google.Apis.Auth `JsonWebSignature.VerifySignedTokenAsync`, 토큰 시각은 시스템 시계).
@@ -422,6 +427,8 @@ public sealed class ShopNotifications : IPurchaseNotificationHandler
 - 서버 알림은 App Store `CONSUMPTION_REQUEST`(환불 심사용 사용 정보 요청)에 답하지 않고, Google 구독의 갱신 결제 환불은 지급 회수 없이 상태만 넘깁니다. 알림은 테스트 인증서·로컬 JWKS 로만 확인했고 실제 Pub/Sub·App Store 알림은 확인하지 않았습니다.
 - 실제 Google Play·App Store 결제는 이 패키지 테스트에서 확인하지 않았습니다(어댑터는 Unity IAP 가짜 스토어로, 서버 검증은 가짜 Android Publisher API 와 Apple 과 같은 모양의 테스트 인증서로 확인). 실제 Apple 인증서의 OCSP 확인도 확인하지 않았습니다.
 - 서버는 클라이언트가 구매 때 넣은 계정 표시(Google `obfuscatedAccountId`, App Store `appAccountToken`)를 지급자에 넘기기만 하고 확인하지 않습니다(`VerifiedPurchase.AccountToken`). 어댑터는 아직 이 값을 넣지 않습니다.
+- 서버 알림의 503(다시 받음)은 알림을 성공으로 버리지 않는다는 뜻이지 복구 보장이 아닙니다. 같은 문제가 계속되면(예: `purchaseDate` 없는 App Store 구독 거래, 모르는 상태) 스토어가 재전송을 그만둔 뒤 이 패키지 안에는 영속 재처리·자동 재조회가 남지 않습니다. 해당 Error 로그를 운영 경보로 받으세요.
+- 지급 요청 전에 모두 환불된 결제는 계정을 기록하지 않고 닫습니다(`Revoked`, 지급하지 않은 계정이 구독 소유자나 환불 취소 수취인이 되지 않게). 그 뒤 App Store 가 환불을 취소해도(`REFUND_REVERSED`) 자동으로 지급하지 못하고 Warning 로그(거래 ID, 상품)를 남깁니다. 지급 요청 때의 Warning 로그(계정, 거래)와 맞춰 고객 지원으로 지급하세요.
 - 이전 서버가 이미 지급한 결제는 새 원장에 없으므로, 원장을 옮기지 않고 바꾸면 남은 거래가 다시 지급될 수 있습니다. `FindAsync` 가 이전 기록도 보게 구현하세요.
 
 ## 테스트

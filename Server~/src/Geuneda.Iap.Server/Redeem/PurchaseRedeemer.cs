@@ -8,7 +8,7 @@ using Microsoft.Extensions.Options;
 namespace Geuneda.Iap.Server
 {
 	/// <summary>
-	/// <see cref="IPurchaseRedeemer"/> 구현입니다. 순서: 요청 검사 → 원장 확인(있으면 스토어를 부르지 않음) → 스토어 검증 → 원장 트랜잭션 안에서 지급 → 스토어 확인(Google).
+	/// <see cref="IPurchaseRedeemer"/> 구현입니다. 순서: 요청 검사 → 원장 확인(지급 기록이 있으면 스토어를 부르지 않음) → 스토어 검증 → 원장 트랜잭션 안에서 지급 → 스토어 확인(Google).
 	/// 원장·지급자가 요청 범위일 수 있어 요청 범위로 등록합니다.
 	/// </summary>
 	internal sealed class PurchaseRedeemer : IPurchaseRedeemer
@@ -17,17 +17,19 @@ namespace Geuneda.Iap.Server
 		private readonly IapProductCatalog _catalog;
 		private readonly IPurchaseLedger _ledger;
 		private readonly IPurchaseGrantor _grantor;
+		private readonly SubscriptionSync _subscriptions;
 		private readonly IapServerOptions _options;
 		private readonly TimeProvider _time;
 		private readonly ILogger<PurchaseRedeemer> _logger;
 
 		public PurchaseRedeemer(StoreVerifierRegistry verifiers, IapProductCatalog catalog, IPurchaseLedger ledger, IPurchaseGrantor grantor,
-			IOptions<IapServerOptions> options, TimeProvider time, ILogger<PurchaseRedeemer> logger)
+			SubscriptionSync subscriptions, IOptions<IapServerOptions> options, TimeProvider time, ILogger<PurchaseRedeemer> logger)
 		{
 			_verifiers = verifiers;
 			_catalog = catalog;
 			_ledger = ledger;
 			_grantor = grantor;
+			_subscriptions = subscriptions;
 			_options = options.Value;
 			_time = time;
 			_logger = logger;
@@ -62,7 +64,7 @@ namespace Geuneda.Iap.Server
 				return Failure(request, IapRedeemStatus.Rejected, IapRedeemCodes.ProductMismatch, $"Product {request.ProductId} is not sold");
 			}
 
-			// 이미 기록한 거래는 스토어를 부르지 않는다(시간 초과 뒤 재시도, 다른 기기의 같은 계정)
+			// 지급 기록이 있는 거래는 스토어를 부르지 않는다(시간 초과 뒤 재시도, 다른 기기의 같은 계정). 계정 없는 지급 전 환불 기록은 검증한 뒤 지급 트랜잭션에서 본다
 			var ledgerStore = verifier.LedgerStore;
 			var existing = await _ledger.FindAsync(ledgerStore, request.TransactionId, cancellationToken);
 
@@ -92,6 +94,9 @@ namespace Geuneda.Iap.Server
 				return Failure(request, IapRedeemStatus.Rejected, IapRedeemCodes.EnvironmentNotAllowed, "Test purchases are not allowed");
 			}
 
+			// 서버가 합칠 수 없는 구독 거래(검증기 오용)는 지급자를 부르기 전에 드러낸다
+			_subscriptions.EnsureMergeable(purchase);
+
 			var redeemedAt = _time.GetUtcNow();
 			var record = new PurchaseRecord
 			{
@@ -114,16 +119,22 @@ namespace Geuneda.Iap.Server
 
 			var granted = default(GrantResult);
 			var refundedBeforeGrant = false;
+			var subscriptionUnreadable = false;
 			var ledgerResult = await _ledger.RedeemAsync(record, async (preGrantRefund, token) =>
 			{
-				// 지급 요청보다 환불 알림이 먼저 왔으면 그 수량만큼 빼고 지급한다. 모두 환불이면 지급자를 부르지 않고 계정만 기록한다
-				// (환불 전 영수증을 다시 내도 지급되지 않고, 나중에 환불이 취소되면 OnRefundReversedAsync 로 이 계정에 돌려줄 수 있게)
+				// 원장이 롤백 뒤 콜백을 다시 부를 수 있으니(동시 요청과의 충돌) 앞 시도의 판정을 남기지 않는다
+				granted = default;
+				refundedBeforeGrant = false;
+				subscriptionUnreadable = false;
+
+				// 지급 요청보다 환불 알림이 먼저 왔으면 그 수량만큼 빼고 지급한다. 모두 환불이면 지급자를 부르지 않고 기록 없이 닫는다
+				// (환불 전 영수증을 다시 내도 지급되지 않음. 계정을 기록하면 지급하지 않은 계정이 구독 소유자·환불 취소 수취인이 됨)
 				var refunded = preGrantRefund == null ? 0 : Math.Min(preGrantRefund.RefundedQuantity, purchase.Quantity);
 
 				if (refunded >= purchase.Quantity)
 				{
 					refundedBeforeGrant = true;
-					return LedgerGrant.Granted(null);
+					return LedgerGrant.NotGranted;
 				}
 
 				granted = await _grantor.GrantAsync(new PurchaseGrant(accountId, product, purchase, request.Payload, purchase.Quantity - refunded), token);
@@ -131,7 +142,17 @@ namespace Geuneda.Iap.Server
 				switch (granted.Status)
 				{
 					case GrantStatus.Granted:
-						return LedgerGrant.Granted(Serialize(granted.Response));
+						// 응답 직렬화를 먼저 한다(구독을 합친 뒤에 실패하지 않게)
+						var response = Serialize(granted.Response);
+
+						// 서버 알림을 쓰면 구독 지급을 같은 트랜잭션에서 구독 스냅숏에 합친다(이 계정 소유). 지금 상태를 읽지 못하면 지급까지 롤백하고 다시 받는다
+						if (!await _subscriptions.SyncGrantAsync(accountId, purchase, product, token))
+						{
+							subscriptionUnreadable = true;
+							return LedgerGrant.NotGranted;
+						}
+
+						return LedgerGrant.Granted(response);
 					case GrantStatus.Rejected:
 					case GrantStatus.RetryLater:
 						return LedgerGrant.NotGranted;
@@ -145,11 +166,12 @@ namespace Geuneda.Iap.Server
 				case LedgerRedeemOutcome.Duplicate:
 					// 같은 거래의 다른 요청이 먼저 지급했다
 					return FromRecord(ledgerResult.Record, accountId);
-				case LedgerRedeemOutcome.Recorded when refundedBeforeGrant:
-					// 확인할 결제도 아니다(환불됨). 확인 대기를 지운다
-					_logger.LogWarning("{Purchase} of account {AccountId} was refunded before its grant; recorded the account without granting", purchase, accountId);
-					await _ledger.MarkAcknowledgedAsync(ledgerResult.Record.Store, ledgerResult.Record.TransactionId, CancellationToken.None);
-					return Response(ledgerResult.Record, IapRedeemStatus.AlreadyGranted, IapRedeemCodes.Revoked, "Refunded before the grant", null);
+				case LedgerRedeemOutcome.NotGranted when refundedBeforeGrant:
+					LogClosedWithoutGrant(purchase.Store, purchase.TransactionId, product.Id, accountId, "refunded before the grant");
+					return Response(record, IapRedeemStatus.AlreadyGranted, IapRedeemCodes.Revoked, "Refunded before the grant", null);
+				case LedgerRedeemOutcome.NotGranted when subscriptionUnreadable:
+					_logger.LogWarning("Could not read the subscription state of {Purchase} for account {AccountId}; rolled the grant back", purchase, accountId);
+					return Failure(request, IapRedeemStatus.RetryLater, IapRedeemCodes.StoreUnavailable, "Could not read the subscription state");
 				case LedgerRedeemOutcome.NotGranted:
 					return FromNotGranted(granted, request, accountId);
 				case LedgerRedeemOutcome.Recorded:
@@ -160,7 +182,6 @@ namespace Geuneda.Iap.Server
 					{
 						await _ledger.MarkAcknowledgedAsync(ledgerResult.Record.Store, ledgerResult.Record.TransactionId, CancellationToken.None);
 					}
-
 
 					return Response(ledgerResult.Record, IapRedeemStatus.Granted, IapRedeemCodes.None, null, granted.Response);
 				default:
@@ -202,8 +223,7 @@ namespace Geuneda.Iap.Server
 						request.Store, request.TransactionId, accountId, verification);
 					return Failure(request, IapRedeemStatus.Rejected, RejectCode(verification.Status), verification.Message);
 				case StoreVerificationStatus.Revoked:
-					_logger.LogInformation("{Store} transaction {TransactionId} of account {AccountId} is revoked: {Verification}",
-						request.Store, request.TransactionId, accountId, verification);
+					LogClosedWithoutGrant(request.Store, request.TransactionId, request.ProductId, accountId, verification.Message);
 					return Failure(request, IapRedeemStatus.AlreadyGranted, IapRedeemCodes.Revoked, verification.Message);
 				case StoreVerificationStatus.Pending:
 					return Failure(request, IapRedeemStatus.RetryLater, IapRedeemCodes.PaymentPending, verification.Message);
@@ -227,6 +247,15 @@ namespace Geuneda.Iap.Server
 				default:
 					throw new InvalidOperationException($"{_ledger.GetType().Name} returned NotGranted without calling the grantor");
 			}
+		}
+
+		/// <summary>
+		/// 지급 없이 닫는 거래를 계정과 함께 남깁니다(Warning). 원장에는 계정을 기록하지 않으므로, App Store 가 나중에 환불을 취소하면 고객 지원이 이 로그로 지급할 계정을 찾습니다.
+		/// </summary>
+		private void LogClosedWithoutGrant(string store, string transactionId, string productId, string accountId, string reason)
+		{
+			_logger.LogWarning("Closed {Store} transaction {TransactionId} ({ProductId}) of account {AccountId} without granting: {Reason}", store, transactionId,
+				productId, accountId, reason);
 		}
 
 		private static int RejectCode(StoreVerificationStatus status)

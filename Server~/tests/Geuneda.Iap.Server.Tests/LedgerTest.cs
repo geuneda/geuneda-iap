@@ -214,8 +214,9 @@ namespace Geuneda.Iap.Server.Tests
 		}
 
 		[Fact]
-		public async Task Subscription_updates_are_delivered_in_observation_order()
+		public async Task Subscription_snapshots_are_what_next_returns()
 		{
+			// 순서와 합치기는 next 가 정한다. 원장은 저장된 것을 넘기고, null 이면 아무것도 하지 않고, 아니면 전달 뒤 저장한다(관측 시각을 비교하지 않음)
 			var ledger = new InMemoryPurchaseLedger();
 			var at = new DateTimeOffset(2026, 10, 15, 0, 0, 0, TimeSpan.Zero);
 			var delivered = new System.Collections.Generic.List<IapSubscriptionState>();
@@ -229,7 +230,7 @@ namespace Geuneda.Iap.Server.Tests
 
 			var first = await ledger.UpdateSubscriptionAsync(IapStoreNames.Fake, "sub-1", (_, _) => Task.FromResult(Update(IapSubscriptionState.Active, at.AddMinutes(2))),
 				Deliver, CancellationToken.None);
-			var stale = await ledger.UpdateSubscriptionAsync(IapStoreNames.Fake, "sub-1", (_, _) => Task.FromResult(Update(IapSubscriptionState.Expired, at)), Deliver,
+			var earlier = await ledger.UpdateSubscriptionAsync(IapStoreNames.Fake, "sub-1", (_, _) => Task.FromResult(Update(IapSubscriptionState.Expired, at)), Deliver,
 				CancellationToken.None);
 			SubscriptionUpdate passed = null;
 			var skipped = await ledger.UpdateSubscriptionAsync(IapStoreNames.Fake, "sub-1", (stored, _) =>
@@ -239,10 +240,200 @@ namespace Geuneda.Iap.Server.Tests
 			}, Deliver, CancellationToken.None);
 
 			Assert.Equal(SubscriptionUpdateOutcome.Delivered, first);
-			Assert.Equal(SubscriptionUpdateOutcome.Stale, stale);
+			Assert.Equal(SubscriptionUpdateOutcome.Delivered, earlier);
 			Assert.Equal(SubscriptionUpdateOutcome.Skipped, skipped);
-			Assert.Equal(IapSubscriptionState.Active, passed.State);
-			Assert.Equal(new[] { IapSubscriptionState.Active }, delivered);
+			Assert.Equal(IapSubscriptionState.Expired, passed.State);
+			Assert.Equal(new[] { IapSubscriptionState.Active, IapSubscriptionState.Expired }, delivered);
+		}
+
+		[Fact]
+		public async Task Subscription_update_inside_a_grant_commits_with_the_grant()
+		{
+			// 구독 지급은 지급 콜백 안에서 구독을 갱신한다. 그 스냅숏은 지급을 기록할 때 저장되고, 그동안 같은 구독의 다른 갱신은 기다리며, 지급이 실패하면 버린다(리뷰 2b 8회차)
+			var ledger = new InMemoryPurchaseLedger();
+			var snapshot = new SubscriptionUpdate { Store = IapStoreNames.Fake, SubscriptionId = "sub-1", AccountId = "account-1", State = IapSubscriptionState.Active };
+			Task Deliver(SubscriptionUpdate update, CancellationToken token) => Task.CompletedTask;
+			var updated = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+			var release = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+			var failed = ledger.RedeemAsync(Record("tx-1"), async (_, token) =>
+			{
+				await ledger.UpdateSubscriptionAsync(IapStoreNames.Fake, "sub-1", (_, _) => Task.FromResult(snapshot), Deliver, token);
+				updated.SetResult(true);
+				await release.Task;
+				throw new InvalidOperationException("grant failed after the subscription update");
+			}, CancellationToken.None);
+			await updated.Task;
+			SubscriptionUpdate seen = null;
+			var waiting = ledger.UpdateSubscriptionAsync(IapStoreNames.Fake, "sub-1", (stored, _) =>
+			{
+				seen = stored;
+				return Task.FromResult<SubscriptionUpdate>(null);
+			}, Deliver, CancellationToken.None);
+			await Task.Delay(100);
+			Assert.False(waiting.IsCompleted);
+			release.SetResult(true);
+
+			await Assert.ThrowsAsync<InvalidOperationException>(() => failed);
+			await waiting;
+			Assert.Null(seen);
+
+			await ledger.RedeemAsync(Record("tx-2"), async (_, token) =>
+			{
+				await ledger.UpdateSubscriptionAsync(IapStoreNames.Fake, "sub-1", (_, _) => Task.FromResult(snapshot), Deliver, token);
+				return LedgerGrant.Granted(null);
+			}, CancellationToken.None);
+			await ledger.UpdateSubscriptionAsync(IapStoreNames.Fake, "sub-1", (stored, _) =>
+			{
+				seen = stored;
+				return Task.FromResult<SubscriptionUpdate>(null);
+			}, Deliver, CancellationToken.None);
+			Assert.Equal(snapshot, seen);
+		}
+
+		[Fact]
+		public async Task Subscription_update_left_running_after_its_grant_is_refused()
+		{
+			// 지급 콜백이 기다리지 않은 작업이 지급이 끝난 뒤 구독을 갱신하면 예외이고, 구독 잠금이 새지 않는다(리뷰 2b 9회차)
+			var ledger = new InMemoryPurchaseLedger();
+			var update = new SubscriptionUpdate { Store = IapStoreNames.Fake, SubscriptionId = "sub-1", State = IapSubscriptionState.Active };
+			Task Deliver(SubscriptionUpdate _, CancellationToken token) => Task.CompletedTask;
+			var signal = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+			Task orphan = null;
+
+			await ledger.RedeemAsync(Record("tx-1"), (_, token) =>
+			{
+				orphan = Task.Run(async () =>
+				{
+					await signal.Task;
+					await ledger.UpdateSubscriptionAsync(IapStoreNames.Fake, "sub-1", (_, _) => Task.FromResult(update), Deliver, CancellationToken.None);
+				});
+				return Task.FromResult(LedgerGrant.Granted(null));
+			}, CancellationToken.None);
+			signal.SetResult(true);
+
+			await Assert.ThrowsAsync<InvalidOperationException>(() => orphan);
+			var next = ledger.UpdateSubscriptionAsync(IapStoreNames.Fake, "sub-1", (_, _) => Task.FromResult(update), Deliver, CancellationToken.None);
+			Assert.Same(next, await Task.WhenAny(next, Task.Delay(TimeSpan.FromSeconds(5))));
+			Assert.Equal(SubscriptionUpdateOutcome.Delivered, await next);
+		}
+
+		[Fact]
+		public async Task Cancelled_wait_for_a_subscription_inside_a_grant_does_not_leak_the_lock()
+		{
+			var ledger = new InMemoryPurchaseLedger();
+			var update = new SubscriptionUpdate { Store = IapStoreNames.Fake, SubscriptionId = "sub-1", State = IapSubscriptionState.Active };
+			Task Deliver(SubscriptionUpdate _, CancellationToken token) => Task.CompletedTask;
+			var holding = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+			var release = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+			var holder = ledger.UpdateSubscriptionAsync(IapStoreNames.Fake, "sub-1", async (_, _) =>
+			{
+				holding.SetResult(true);
+				await release.Task;
+				return update;
+			}, Deliver, CancellationToken.None);
+			await holding.Task;
+			using var cancel = new CancellationTokenSource(TimeSpan.FromMilliseconds(100));
+
+			await Assert.ThrowsAnyAsync<OperationCanceledException>(() => ledger.RedeemAsync(Record("tx-1"), async (_, token) =>
+			{
+				await ledger.UpdateSubscriptionAsync(IapStoreNames.Fake, "sub-1", (_, _) => Task.FromResult(update), Deliver, cancel.Token);
+				return LedgerGrant.Granted(null);
+			}, CancellationToken.None));
+			release.SetResult(true);
+			await holder;
+
+			var next = ledger.UpdateSubscriptionAsync(IapStoreNames.Fake, "sub-1", (_, _) => Task.FromResult(update), Deliver, CancellationToken.None);
+			Assert.Same(next, await Task.WhenAny(next, Task.Delay(TimeSpan.FromSeconds(5))));
+			Assert.Null(await ledger.FindAsync(IapStoreNames.Fake, "tx-1", CancellationToken.None));
+		}
+
+		[Fact]
+		public async Task Concurrent_subscription_updates_inside_one_grant_do_not_deadlock()
+		{
+			// 한 지급 콜백이 같은 구독의 갱신 둘을 동시에 기다려도, 지급 안의 갱신을 하나씩 해 교착하지 않는다(리뷰 2b 10회차)
+			var ledger = new InMemoryPurchaseLedger();
+			SubscriptionUpdate Update(IapSubscriptionState state) => new SubscriptionUpdate { Store = IapStoreNames.Fake, SubscriptionId = "sub-1", State = state };
+			Task Deliver(SubscriptionUpdate _, CancellationToken token) => Task.CompletedTask;
+			var holding = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+			var release = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+			var holder = ledger.UpdateSubscriptionAsync(IapStoreNames.Fake, "sub-1", async (_, _) =>
+			{
+				holding.SetResult(true);
+				await release.Task;
+				return null;
+			}, Deliver, CancellationToken.None);
+			await holding.Task;
+
+			var redeem = ledger.RedeemAsync(Record("tx-1"), async (_, token) =>
+			{
+				await Task.WhenAll(
+					ledger.UpdateSubscriptionAsync(IapStoreNames.Fake, "sub-1", (_, _) => Task.FromResult(Update(IapSubscriptionState.Active)), Deliver, token),
+					ledger.UpdateSubscriptionAsync(IapStoreNames.Fake, "sub-1", (stored, _) => Task.FromResult(stored with { State = IapSubscriptionState.Canceled }),
+						Deliver, token));
+				return LedgerGrant.Granted(null);
+			}, CancellationToken.None);
+			await Task.Delay(100);
+			release.SetResult(true);
+			await holder;
+
+			Assert.Same(redeem, await Task.WhenAny(redeem, Task.Delay(TimeSpan.FromSeconds(5))));
+			Assert.Equal(LedgerRedeemOutcome.Recorded, (await redeem).Outcome);
+			SubscriptionUpdate seen = null;
+			var next = ledger.UpdateSubscriptionAsync(IapStoreNames.Fake, "sub-1", (stored, _) =>
+			{
+				seen = stored;
+				return Task.FromResult<SubscriptionUpdate>(null);
+			}, Deliver, CancellationToken.None);
+			Assert.Same(next, await Task.WhenAny(next, Task.Delay(TimeSpan.FromSeconds(5))));
+			Assert.Equal(IapSubscriptionState.Canceled, seen.State);
+		}
+
+		[Fact]
+		public async Task Cancelled_wait_for_the_grant_serial_does_not_break_later_updates()
+		{
+			// 같은 지급 안에서 앞 갱신을 기다리던 갱신이 취소되면 그 콜백은 불리지 않고, 앞 갱신과 이어지는 갱신은 그대로 진행된다(리뷰 2b 11회차)
+			var ledger = new InMemoryPurchaseLedger();
+			var update = new SubscriptionUpdate { Store = IapStoreNames.Fake, SubscriptionId = "sub-1", State = IapSubscriptionState.Active };
+			Task Deliver(SubscriptionUpdate _, CancellationToken token) => Task.CompletedTask;
+			var firstEntered = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+			var releaseFirst = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+			var secondCalled = false;
+			using var cancel = new CancellationTokenSource();
+
+			var redeem = ledger.RedeemAsync(Record("tx-1"), async (_, token) =>
+			{
+				var first = ledger.UpdateSubscriptionAsync(IapStoreNames.Fake, "sub-1", async (_, _) =>
+				{
+					firstEntered.SetResult(true);
+					await releaseFirst.Task;
+					return update;
+				}, Deliver, token);
+				await firstEntered.Task;
+				var second = ledger.UpdateSubscriptionAsync(IapStoreNames.Fake, "sub-1", (_, _) =>
+				{
+					secondCalled = true;
+					return Task.FromResult(update);
+				}, Deliver, cancel.Token);
+				cancel.Cancel();
+				await Assert.ThrowsAnyAsync<OperationCanceledException>(() => second);
+				releaseFirst.SetResult(true);
+				await first;
+				Assert.Equal(SubscriptionUpdateOutcome.Delivered, await ledger.UpdateSubscriptionAsync(IapStoreNames.Fake, "sub-1",
+					(stored, _) => Task.FromResult(stored with { State = IapSubscriptionState.Canceled }), Deliver, token));
+				return LedgerGrant.Granted(null);
+			}, CancellationToken.None);
+
+			Assert.Same(redeem, await Task.WhenAny(redeem, Task.Delay(TimeSpan.FromSeconds(5))));
+			Assert.Equal(LedgerRedeemOutcome.Recorded, (await redeem).Outcome);
+			Assert.False(secondCalled);
+			SubscriptionUpdate seen = null;
+			await ledger.UpdateSubscriptionAsync(IapStoreNames.Fake, "sub-1", (stored, _) =>
+			{
+				seen = stored;
+				return Task.FromResult<SubscriptionUpdate>(null);
+			}, Deliver, CancellationToken.None);
+			Assert.Equal(IapSubscriptionState.Canceled, seen.State);
 		}
 
 		[Fact]

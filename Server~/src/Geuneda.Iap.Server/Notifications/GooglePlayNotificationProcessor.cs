@@ -181,9 +181,19 @@ namespace Geuneda.Iap.Server
 		}
 
 		/// <summary>
-		/// 원장의 구독 잠금 안에서 지금 상태를 조회해 넘깁니다. 조회가 잠금 안이라 늦게 끝난 옛 조회가 새 상태를 덮지 못하고, 관측 시각은 저장된 것보다 늦게 맞춥니다.
+		/// 지급 트랜잭션 안에서 구독의 지금 상태를 구독 잠금 안에서 다시 읽어 그 계정 소유로 넘깁니다. 지급 검증의 조회는 잠금 밖이라 그사이 저장된 알림 상태보다 오래됐을 수도,
+		/// 더 새로울 수도 있어서 쓰지 않습니다. 읽지 못했거나 결제 전 상태면 false(지급을 롤백하고 다시 시도)입니다.
 		/// </summary>
-		private async Task<NotificationOutcome> DeliverSubscriptionAsync(string token, string type, CancellationToken cancellationToken)
+		public async Task<bool> SyncGrantAsync(string accountId, string token, CancellationToken cancellationToken)
+		{
+			return await DeliverSubscriptionAsync(token, SubscriptionSync.Redeem, cancellationToken, accountId) == NotificationOutcome.Processed;
+		}
+
+		/// <summary>
+		/// 원장의 구독 잠금 안에서 지금 상태를 조회해 넘깁니다. 조회가 잠금 안이라 늦게 끝난 옛 조회가 새 상태를 덮지 못하고, 관측 시각은 저장된 것보다 늦게 맞춥니다.
+		/// 계정은 <paramref name="accountId"/>(구독 지급), 없으면 앞 스냅숏의 계정이고, 그것도 없을 때만 원장에서 찾습니다.
+		/// </summary>
+		private async Task<NotificationOutcome> DeliverSubscriptionAsync(string token, string type, CancellationToken cancellationToken, string accountId = null)
 		{
 			var outcome = NotificationOutcome.Processed;
 			await _ledger.UpdateSubscriptionAsync(IapStoreNames.GooglePlay, token, async (stored, ct) =>
@@ -239,12 +249,12 @@ namespace Geuneda.Iap.Server
 					}
 				}
 
-				// 업그레이드·재가입한 새 구독은 클라이언트가 지급 요청하기 전이면 원장에 없다. 이전 구독의 계정, 그다음 앞서 저장된 계정을 쓴다
-				var owner = await FindOwnerAsync(token, ct);
+				// 소유 계정은 스냅숏이 정한다(구독 지급이 구독 잠금 안에서 정함). 없을 때만 원장에서 찾는다. 업그레이드·재가입한 새 구독은 지급 요청 전이면 원장에 없어 이전 구독의 계정을 쓴다
+				var owner = accountId ?? stored?.AccountId ?? (await FindOwnerAsync(token, ct))?.AccountId;
 
 				if (owner == null && !string.IsNullOrEmpty(subscription.LinkedPurchaseToken))
 				{
-					owner = await FindOwnerAsync(subscription.LinkedPurchaseToken, ct);
+					owner = (await FindOwnerAsync(subscription.LinkedPurchaseToken, ct))?.AccountId;
 				}
 
 				// 조회는 잠금 안이라 지금이 가장 새로운 관측이다. 서버 간 시계 오차로 저장된 시각보다 이르지 않게 맞춘다
@@ -257,7 +267,7 @@ namespace Geuneda.Iap.Server
 					LinkedSubscriptionId = string.IsNullOrEmpty(subscription.LinkedPurchaseToken) ? null : subscription.LinkedPurchaseToken,
 					StoreProductId = lineItem.ProductId,
 					Product = product,
-					AccountId = owner?.AccountId ?? stored?.AccountId,
+					AccountId = owner,
 					State = state,
 					ExpiresAt = GooglePlayVerifier.ParseTime(lineItem.ExpiryTime),
 					AutoRenewing = lineItem.AutoRenewingPlan?.AutoRenewEnabled,

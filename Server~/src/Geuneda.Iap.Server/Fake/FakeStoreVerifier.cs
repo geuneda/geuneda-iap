@@ -39,7 +39,6 @@ namespace Geuneda.Iap.Server
 				StoreProductId = product.Id,
 				ProductType = product.Type,
 				PurchasedAt = _time.GetUtcNow(),
-				ObservedAt = _time.GetUtcNow(),
 				SubscriptionState = product.Type == IapProductType.Subscription ? IapSubscriptionState.Active : null,
 				IsTest = true
 			}));

@@ -37,6 +37,7 @@ namespace Geuneda.Iap.Server
 			services.TryAddSingleton<IapProductCatalog>();
 			services.TryAddSingleton<StoreVerifierRegistry>();
 			services.TryAddScoped<IPurchaseRedeemer, PurchaseRedeemer>();
+			services.TryAddScoped<SubscriptionSync>();
 			return new IapServerBuilder(services);
 		}
 

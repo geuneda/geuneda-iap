@@ -115,12 +115,12 @@ namespace Geuneda.Iap.Server.Tests
 
 		/// <summary>원장에 지급 기록을 바로 넣습니다(알림 테스트의 사전 조건).</summary>
 		public Task GrantAsync(string store, string transactionId, string productId, int quantity = 1, string account = DefaultAccount, string orderId = null,
-			string storeProductId = null, string originalTransactionId = null)
+			string storeProductId = null, string originalTransactionId = null, DateTimeOffset? redeemedAt = null)
 		{
 			var record = new PurchaseRecord
 			{
 				Store = store, TransactionId = transactionId, AccountId = account, ProductId = productId, StoreProductId = storeProductId ?? productId,
-				Quantity = quantity, OrderId = orderId, OriginalTransactionId = originalTransactionId, PurchasedAt = Now, RedeemedAt = Now
+				Quantity = quantity, OrderId = orderId, OriginalTransactionId = originalTransactionId, PurchasedAt = Now, RedeemedAt = redeemedAt ?? Now
 			};
 			return Ledger.RedeemAsync(record, (_, _) => Task.FromResult(LedgerGrant.Granted(null)), System.Threading.CancellationToken.None);
 		}

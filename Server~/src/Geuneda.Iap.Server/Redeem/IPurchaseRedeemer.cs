@@ -4,7 +4,7 @@ using System.Threading.Tasks;
 namespace Geuneda.Iap.Server
 {
 	/// <summary>
-	/// 지급 요청을 처리합니다. 원장에 이미 있으면 스토어를 부르지 않고 답하고, 없으면 스토어에 검증한 뒤 원장과 같은 트랜잭션에서 지급합니다.
+	/// 지급 요청을 처리합니다. 원장에 지급 기록이 있으면 스토어를 부르지 않고 답하고, 없으면(지급 전 환불 기록뿐이어도) 스토어에 검증한 뒤 원장과 같은 트랜잭션에서 지급합니다.
 	/// HTTP 엔드포인트(<see cref="IapServerExtensions.MapGeunedaIap"/>)가 쓰고, 실시간 RPC 처럼 다른 경로에서는 직접 부릅니다(요청 범위 서비스).
 	/// </summary>
 	public interface IPurchaseRedeemer

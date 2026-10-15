@@ -334,8 +334,14 @@ namespace Geuneda.Iap.Server.Tests
 			var (_, body) = await _server.RedeemAsync(IapTestServer.Request(IapStoreNames.GooglePlay, "vip_month", "sub-2"));
 
 			Assert.Empty(Handler.Refunds);
-			Assert.Equal(3, Handler.Subscriptions.Count);
 			Assert.Equal(IapRedeemStatus.Granted, body.Status());
+
+			// 알림 셋과 sub-2 지급의 구독 동기화(지급 트랜잭션 안, 그 계정 소유)
+			Assert.Equal(4, Handler.Subscriptions.Count);
+			var synced = Handler.Subscriptions.Last();
+			Assert.Equal("sub-2", synced.SubscriptionId);
+			Assert.Equal(IapTestServer.DefaultAccount, synced.AccountId);
+			Assert.Equal(SubscriptionSync.Redeem, synced.NotificationType);
 		}
 
 		[Fact]

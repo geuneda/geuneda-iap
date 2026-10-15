@@ -20,7 +20,6 @@ namespace Geuneda.Iap.Server
 		public long? ExpiresDate { get; set; }
 		public long? Price { get; set; }
 		public string Currency { get; set; }
-		public long? SignedDate { get; set; }
 	}
 
 	/// <summary>App Store Server Notifications V2 요청 본문</summary>

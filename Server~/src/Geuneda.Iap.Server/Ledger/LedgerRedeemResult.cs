@@ -66,10 +66,7 @@ namespace Geuneda.Iap.Server
 		/// <summary>전달하고 저장했습니다</summary>
 		Delivered = 1,
 
-		/// <summary>저장된 상태보다 오래된 상태라 전달하지 않았습니다</summary>
-		Stale = 2,
-
-		/// <summary>전달할 상태가 없었습니다(조회 실패 등)</summary>
+		/// <summary>바꿀 상태가 없었습니다(조회 실패, 저장된 것보다 오래된 알림 등)</summary>
 		Skipped = 3,
 	}
 

@@ -44,6 +44,7 @@ namespace Geuneda.Iap.Server
 		/// 트랜잭션 안에서 지급 기록을 찾았으면 <paramref name="grant"/> 를 부르지 않고 <see cref="LedgerRedeemResult.Duplicate"/> 입니다. 동시 요청과 경쟁해 커밋 때 유일 제약에 걸렸으면
 		/// <paramref name="grant"/> 를 이미 불렀더라도 트랜잭션 전체(지급 포함)를 롤백하고 처음부터 다시 합니다(이긴 쪽이 지급이면 <see cref="LedgerRedeemResult.Duplicate"/>,
 		/// 지급 전 환불 기록이면 그것을 인자로 다시 <paramref name="grant"/>). <paramref name="grant"/> 가 예외를 던지면 롤백하고 예외를 그대로 던집니다.
+		/// <paramref name="grant"/> 안에서 시작한 원장 작업(구독 지급의 <see cref="UpdateSubscriptionAsync"/>)은 돌아가기 전에 모두 기다려야 합니다(지급 트랜잭션이 끝난 뒤의 작업은 그 트랜잭션에 들지 않음).
 		/// </remarks>
 		Task<LedgerRedeemResult> RedeemAsync(PurchaseRecord record, Func<PurchaseRecord, CancellationToken, Task<LedgerGrant>> grant, CancellationToken cancellationToken);
 
@@ -82,12 +83,14 @@ namespace Geuneda.Iap.Server
 		Task<PurchaseRecord> FindByOriginalTransactionAsync(string store, string originalTransactionId, CancellationToken cancellationToken);
 
 		/// <summary>
-		/// 구독 상태를 구독마다 한 번에 하나씩, 관측 시각 순서로 반영합니다. 한 트랜잭션(그 구독 행 잠금)에서 저장된 마지막 상태(없으면 null)로 <paramref name="next"/> 를 부르고
-		/// (Google 은 이 안에서 지금 상태를 조회), 돌려받은 상태가 null 이면 <see cref="SubscriptionUpdateOutcome.Skipped"/>, 그 <see cref="SubscriptionUpdate.ObservedAt"/> 이 저장된 것보다 이르면
-		/// <see cref="SubscriptionUpdateOutcome.Stale"/>, 아니면 <paramref name="deliver"/>(알림 처리기)를 같은 트랜잭션에서 부른 뒤 그 상태를 저장하고 <see cref="SubscriptionUpdateOutcome.Delivered"/> 입니다.
+		/// 구독의 합친 권한 스냅숏(<see cref="SubscriptionUpdate"/>)을 구독마다 한 번에 하나씩 바꿉니다. 한 트랜잭션(그 구독 행 잠금)에서 저장된 스냅숏(없으면 null)으로
+		/// <paramref name="next"/> 를 부르고, 돌려받은 것이 null 이면 아무것도 하지 않고 <see cref="SubscriptionUpdateOutcome.Skipped"/>, 아니면 <paramref name="deliver"/>(알림 처리기)를
+		/// 같은 트랜잭션에서 부른 뒤 그 스냅숏을 저장하고 <see cref="SubscriptionUpdateOutcome.Delivered"/> 입니다. 순서와 합치기는 <paramref name="next"/> 가 정하므로 원장은 비교하지 않습니다.
 		/// </summary>
 		/// <remarks>
-		/// 여러 서버에서도 같은 구독의 조회·전달이 겹치지 않아야 하므로 잠금은 DB 에 둡니다(조회가 잠금 안에서 일어나 늦게 끝난 옛 조회가 새 상태를 덮지 못함).
+		/// 여러 서버에서도 같은 구독의 조회·합치기가 겹치지 않아야 하므로 잠금은 DB 에 둡니다(Google 은 이 안에서 지금 상태를 조회해 늦게 끝난 옛 조회가 새 상태를 덮지 못함).
+		/// 구독 지급은 <see cref="RedeemAsync"/> 의 지급 콜백 안에서 이 메서드를 부릅니다(지급과 구독 스냅숏을 함께 커밋). 그때는 지급 트랜잭션에 참여하세요(같은 DB 컨텍스트·세션, 새 트랜잭션을 열지 않음).
+		/// 잠금 순서는 언제나 거래 행 → 구독 행이고, 구독 잠금 안에서는 거래 행을 잠그지 않습니다(<see cref="FindAsync"/>·<see cref="FindByOriginalTransactionAsync"/> 는 잠그지 않는 읽기).
 		/// <paramref name="next"/>·<paramref name="deliver"/> 가 예외를 던지면 롤백하고 예외를 그대로 던집니다.
 		/// </remarks>
 		Task<SubscriptionUpdateOutcome> UpdateSubscriptionAsync(string store, string subscriptionId,

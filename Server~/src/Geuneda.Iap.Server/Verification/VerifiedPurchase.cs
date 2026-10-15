@@ -47,17 +47,21 @@ namespace Geuneda.Iap.Server
 		/// <summary>구매 수량. 모르면 1</summary>
 		public int Quantity { get; init; } = 1;
 
-		/// <summary>결제가 끝난 시각. 모르면 null</summary>
+		/// <summary>결제가 끝난 시각. 모르면 null. 구독은 이 거래가 낸 결제 기간의 시작이라, Google 이 아닌 스토어에서 서버 알림을 쓰면 필수입니다(구독 기간 순서의 기준)</summary>
 		public DateTimeOffset? PurchasedAt { get; init; }
 
 		/// <summary>구독 만료 시각. 구독이 아니면 null</summary>
 		public DateTimeOffset? ExpiresAt { get; init; }
 
-		/// <summary>구독 상태. 구독이 아니면 null</summary>
+		/// <summary>
+		/// 검증 때 읽은 구독 상태. 구독이 아니면 null 입니다. 서버 알림을 쓰면 서버가 지급 트랜잭션 안에서 이 구독을 합친 스냅숏(<see cref="SubscriptionUpdate"/>)을 알림 처리기에 넘기므로
+		/// 지급자가 이 값으로 구독 권한을 쓰지 마세요(알림 잠금 밖에서 읽은 것이라 더 새 상태보다 늦을 수 있고, App Store 는 만료 시각으로만 정한 것). 서버 알림을 쓰지 않을 때만 지급자가 이 값을 씁니다.
+		/// 사용자 정의 검증기는 구독 거래에 이 값을 채워야 합니다(서버 알림을 쓰면 이 값으로 스냅숏을 만들고, 없으면 지급이 예외로 실패)
+		/// </summary>
 		public IapSubscriptionState? SubscriptionState { get; init; }
 
 		/// <summary>
-		/// 서버 알림(<see cref="SubscriptionUpdate.SubscriptionId"/>)과 같은 구독 ID 입니다(Google 은 구매 토큰, App Store 는 원래 거래 ID). 계정을 모를 때 받은 구독 갱신을 지급 때 연결하는 키입니다.
+		/// 서버 알림(<see cref="SubscriptionUpdate.SubscriptionId"/>)과 같은 구독 ID 입니다(Google 은 구매 토큰, App Store 는 원래 거래 ID).
 		/// 구독이 아니면 null
 		/// </summary>
 		public string SubscriptionId => ProductType == IapProductType.Subscription ? OriginalTransactionId ?? TransactionId : null;
@@ -65,13 +69,7 @@ namespace Geuneda.Iap.Server
 		/// <summary>테스트 결제(Google 라이선스 테스터, App Store 샌드박스, 가짜 스토어)인지</summary>
 		public bool IsTest { get; init; }
 
-		/// <summary>
-		/// 이 상태의 관측 시각입니다. Google 은 서버가 조회한 시각, App Store 는 거래 서명의 <c>signedDate</c> 입니다. 지급자가 저장해 둔 서버 알림 상태(<see cref="SubscriptionUpdate.ObservedAt"/>)와
-		/// 비교해 더 최신인 쪽을 고를 때 씁니다. App Store 거래 서명의 구독 상태는 만료 시각으로만 정한 것이라(자동 갱신·유예 정보 없음) 시각이 같거나 비슷하면 알림 상태를 우선하세요
-		/// </summary>
-		public DateTimeOffset ObservedAt { get; init; }
-
-		/// <summary>구독의 자동 갱신이 켜져 있는지(Google). 모르면 null(App Store 거래 서명에는 없음)</summary>
+		/// <summary>구독의 자동 갱신이 켜져 있는지(Google). 모르면 null(App Store 거래 서명에는 없음). <see cref="SubscriptionState"/> 와 같은 때만 씁니다</summary>
 		public bool? AutoRenewing { get; init; }
 
 		/// <summary>

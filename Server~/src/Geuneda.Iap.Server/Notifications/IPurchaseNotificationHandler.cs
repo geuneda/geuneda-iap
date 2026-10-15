@@ -13,9 +13,9 @@ namespace Geuneda.Iap.Server
 	/// 예외를 던지면 롤백하고 HTTP 500 으로 답해 스토어가 알림을 다시 보냅니다.
 	/// </para>
 	/// <para>
-	/// 구독 변경은 그 시점의 상태 스냅숏이고, 원장(<see cref="IPurchaseLedger.UpdateSubscriptionAsync"/>)이 구독마다 하나씩 관측 시각 순서로만 넘기므로 받은 순서대로 반영하면 됩니다.
-	/// 지급 요청 전에 온 갱신은 <see cref="SubscriptionUpdate.AccountId"/> 가 null 이고 다시 오지 않으므로, <see cref="SubscriptionUpdate.SubscriptionId"/> 로 저장해 두고 지급자가
-	/// <see cref="VerifiedPurchase.SubscriptionId"/> 로 계정에 연결합니다(README '구독 계정 연결'). 같은 트랜잭션에서 불리며 예외를 던지면 롤백하고 500 입니다.
+	/// 구독은 서버가 합친 권한 스냅숏(<see cref="SubscriptionUpdate"/>)이 바뀔 때마다 옵니다(서버 알림, 그리고 구독 지급 때는 지급 트랜잭션 안에서).
+	/// 원장의 구독 잠금 안에서 합치므로 받은 것을 <see cref="SubscriptionUpdate.SubscriptionId"/> 로 그대로 저장하면 됩니다(계정은 스냅숏의 것, 지급 전이면 null 이고 지급 때 다시 옴).
+	/// 같은 트랜잭션에서 불리며 예외를 던지면 롤백하고 500 입니다(구독 지급이면 지급도 롤백).
 	/// </para>
 	/// </remarks>
 	public interface IPurchaseNotificationHandler
@@ -26,7 +26,7 @@ namespace Geuneda.Iap.Server
 		/// <summary>환불이 취소됐습니다(App Store 분쟁 뒤 환불 철회). <see cref="PurchaseRefund.Quantity"/> 만큼 다시 지급합니다.</summary>
 		Task OnRefundReversedAsync(PurchaseRefund refund, CancellationToken cancellationToken);
 
-		/// <summary>구독 상태가 바뀌었을 수 있습니다(갱신, 자동 갱신 끔, 결제 실패, 만료, 철회 등). 상태와 만료 시각으로 권한을 맞춥니다.</summary>
+		/// <summary>구독 권한 스냅숏이 바뀌었습니다(지급, 갱신, 자동 갱신 끔, 결제 실패, 만료, 철회 등). 그대로 저장해 상태와 만료 시각으로 권한을 맞춥니다.</summary>
 		Task OnSubscriptionChangedAsync(SubscriptionUpdate update, CancellationToken cancellationToken);
 	}
 }

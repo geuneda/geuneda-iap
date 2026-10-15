@@ -4,6 +4,18 @@
 이 형식은 [Keep a Changelog](http://keepachangelog.com/en/1.0.0/)를 기반으로 하며,
 이 프로젝트는 [Semantic Versioning](http://semver.org/spec/v2.0.0.html)을 따릅니다.
 
+## [0.3.0] - 2026-10-15
+
+**Changed**:
+- 지급 요청 전에 모두 환불된 결제의 지급 요청은 계정을 기록하지 않고 닫음(`Revoked`, 계정·거래는 Warning 로그 `Closed ... without granting`, 검증기가 `Revoked` 라고 답한 환불 후 서명도 같음). 0.2.0 처럼 계정만 기록하면 지급하지 않은 계정이 구독 소유자·환불 취소 수취인이 되고 지급자의 계정 확인을 건너뜀. 그 뒤의 App Store 환불 취소(`REFUND_REVERSED`)는 자동으로 지급하지 않고 Warning 로그(고객 지원으로 지급). 0.2.0 원장을 운영에 썼다면 지급 감사 기록으로 '계정만 기록한' 행(지급 없이 모두 환불)을 찾아 계정을 지우세요(`GrantResponse` null 만으로는 정상 지급과 구분할 수 없음). 0.2.0 은 같은 날 나와 운영에 쓰이지 않았다고 보고 변환 코드는 두지 않음
+- 구독 권한을 서버가 합쳐 넘김(README '구독 권한'): `SubscriptionUpdate` 는 원장의 구독 잠금 안에서 서버 알림과 구독 지급을 합친 권한 스냅숏이고, 처리기는 그대로 저장하면 됨(지급자는 구독 권한을 쓰지 않음). 구독 지급은 지급 트랜잭션 안에서 합침(그 계정이 소유자, Google 은 잠금 안에서 다시 읽고 못 읽으면 지급까지 롤백하고 `RetryLater`). Google 은 잠금 안에서 읽은 지금 상태가 이기고, App Store 는 기간(새 `SubscriptionUpdate.PeriodStartedAt`, 거래 구매 시각)이 뒤인 것, 같은 기간이면 늦게 서명된 알림이 이김(갱신 거래 지급이 늦은 갱신 알림 없이 권한을 올리고, 앞 기간 알림은 되돌리지도 순서 기준을 바꾸지도 않음, 긴 상품에서 짧은 상품으로의 업그레이드도 맞음). 소유 계정은 스냅숏이 정함(새 `SubscriptionUpdate.AccountPeriodStartedAt`: 소유자를 정한 지급의 기간, 그보다 같거나 뒤 기간의 지급이 소유자가 되고 알림은 소유자를 바꾸지 않음, 알림은 계정이 비었을 때만 원장에서 찾음). 가짜 스토어·사용자 정의 스토어도 지급한 거래로 같은 규칙(구독 거래에 `SubscriptionState`·`PurchasedAt` 필요, 없으면 지급 전 예외). App Store 구독 알림의 거래에 `purchaseDate` 가 없으면 상태를 바꾸지 않고 503
+- `IPurchaseLedger.UpdateSubscriptionAsync`: 원장은 관측 시각을 비교하지 않고 잠금·저장만(콜백이 null 이면 아무것도 안 함). 구독 지급의 지급 콜백 안에서도 불리므로 지급 트랜잭션에 참여(`InMemoryPurchaseLedger` 도 지급과 함께 저장하고 그때까지 구독 잠금을 쥠). `SubscriptionUpdateOutcome.Stale` 제거
+- `VerifiedPurchase.ObservedAt` 제거(지급 검증의 상태를 알림과 시각으로 비교하던 0.2.0 계약에만 쓰던 값)
+
+**Fixed**:
+- App Store 구독 알림의 소유 계정을 구독 잠금 안에서 찾음(잠금 밖에서 읽은 옛 계정이 그사이 저장된 새 소유자를 덮던 것)
+- 원장이 롤백 뒤 지급 콜백을 다시 부르면 앞 시도의 '모두 환불' 판정이 남아 지급 미룸(`RetryLater`)을 `Revoked` 로 답하던 것
+
 ## [0.2.0] - 2026-10-15
 
 **New**:

@@ -105,15 +105,16 @@ namespace Geuneda.Iap.Server.Tests
 
 		/// <summary>App Store 거래 페이로드(JWSTransactionDecodedPayload 모양)입니다.</summary>
 		public static Dictionary<string, object> Transaction(string transactionId, string productId, string environment = "Production",
-			string bundleId = BundleId, long? revocationDate = null, long? expiresDate = null, long signedDate = 1_760_000_000_000)
+			string bundleId = BundleId, long? revocationDate = null, long? expiresDate = null, long signedDate = 1_760_000_000_000,
+			long purchaseDate = 1_760_000_000_000, string originalTransactionId = "1000000000000001")
 		{
 			var payload = new Dictionary<string, object>
 			{
 				{ "transactionId", transactionId },
-				{ "originalTransactionId", "1000000000000001" },
+				{ "originalTransactionId", originalTransactionId },
 				{ "bundleId", bundleId },
 				{ "productId", productId },
-				{ "purchaseDate", 1_760_000_000_000L },
+				{ "purchaseDate", purchaseDate },
 				{ "quantity", 1 },
 				{ "type", "Consumable" },
 				{ "environment", environment },

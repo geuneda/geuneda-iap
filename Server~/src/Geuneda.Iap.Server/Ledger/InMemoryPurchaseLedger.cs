@@ -9,7 +9,7 @@ namespace Geuneda.Iap.Server
 {
 	/// <summary>
 	/// 메모리 원장입니다. 개발·테스트용입니다. 서버를 다시 시작하면 기록이 사라지고, 게임 데이터가 메모리 밖(DB)에 있으면 원장과 지급이 한 트랜잭션이 아닙니다.
-	/// 같은 거래의 동시 요청은 거래마다 하나씩 처리합니다.
+	/// 같은 거래의 동시 요청은 거래마다 하나씩 처리합니다. 지급 콜백 안의 구독 갱신(구독 지급)은 지급과 함께 저장하고, 그동안 그 구독 잠금을 쥡니다(지급이 실패하면 버림).
 	/// </summary>
 	public sealed class InMemoryPurchaseLedger : IPurchaseLedger
 	{
@@ -22,9 +22,12 @@ namespace Geuneda.Iap.Server
 		private readonly ConcurrentDictionary<(string Store, string SubscriptionId), SubscriptionUpdate> _subscriptions =
 			new ConcurrentDictionary<(string Store, string SubscriptionId), SubscriptionUpdate>();
 
-		// 구독 잠금은 거래 잠금과 따로 둔다(구독 전달 안에서 같은 키의 거래를 고쳐도 교착하지 않게)
+		// 구독 잠금은 거래 잠금과 따로 둔다. 구독 지급은 거래 잠금 안에서 구독 잠금을 잡고(순서는 늘 거래 → 구독), 구독 잠금 안에서는 거래 잠금을 잡지 않는다
 		private readonly ConcurrentDictionary<(string Store, string SubscriptionId), SemaphoreSlim> _subscriptionGates =
 			new ConcurrentDictionary<(string Store, string SubscriptionId), SemaphoreSlim>();
+
+		// 지금 흐름이 지급 콜백 안이면 그 지급의 트랜잭션(구독 갱신을 지급과 함께 반영)
+		private readonly AsyncLocal<GrantTransaction> _grant = new AsyncLocal<GrantTransaction>();
 
 		public Task<PurchaseRecord> FindAsync(string store, string transactionId, CancellationToken cancellationToken)
 		{
@@ -48,6 +51,8 @@ namespace Geuneda.Iap.Server
 			var key = (record.Store, record.TransactionId);
 			var gate = _gates.GetOrAdd(key, _ => new SemaphoreSlim(1, 1));
 			await gate.WaitAsync(cancellationToken);
+			var transaction = new GrantTransaction();
+			_grant.Value = transaction;
 
 			try
 			{
@@ -73,10 +78,23 @@ namespace Geuneda.Iap.Server
 					RefundedAt = existing?.RefundedAt ?? record.RefundedAt
 				};
 				_records[key] = stored;
+
+				foreach (var subscription in transaction.Complete())
+				{
+					_subscriptions[subscription.Key] = subscription.Value;
+				}
+
 				return LedgerRedeemResult.Recorded(stored);
 			}
 			finally
 			{
+				_grant.Value = null;
+
+				foreach (var held in transaction.Close())
+				{
+					held.Release();
+				}
+
 				gate.Release();
 			}
 		}
@@ -203,6 +221,13 @@ namespace Geuneda.Iap.Server
 
 			var key = (store, subscriptionId);
 			var gate = _subscriptionGates.GetOrAdd(key, _ => new SemaphoreSlim(1, 1));
+			var transaction = _grant.Value;
+
+			if (transaction != null)
+			{
+				return await UpdateInGrantAsync(transaction, key, gate, next, deliver, cancellationToken);
+			}
+
 			await gate.WaitAsync(cancellationToken);
 
 			try
@@ -215,11 +240,6 @@ namespace Geuneda.Iap.Server
 					return SubscriptionUpdateOutcome.Skipped;
 				}
 
-				if (stored != null && candidate.ObservedAt < stored.ObservedAt)
-				{
-					return SubscriptionUpdateOutcome.Stale;
-				}
-
 				await deliver(candidate, cancellationToken);
 				_subscriptions[key] = candidate;
 				return SubscriptionUpdateOutcome.Delivered;
@@ -227,6 +247,46 @@ namespace Geuneda.Iap.Server
 			finally
 			{
 				gate.Release();
+			}
+		}
+
+		/// <summary>
+		/// 지급 콜백 안의 구독 갱신입니다. 구독 잠금은 지급이 끝날 때 풀고, 스냅숏은 지급을 기록할 때 저장합니다. 지급이 끝난 뒤에 불리면(콜백이 기다리지 않은 작업) 예외입니다.
+		/// </summary>
+		private async Task<SubscriptionUpdateOutcome> UpdateInGrantAsync(GrantTransaction transaction, (string, string) key, SemaphoreSlim gate,
+			Func<SubscriptionUpdate, CancellationToken, Task<SubscriptionUpdate>> next, Func<SubscriptionUpdate, CancellationToken, Task> deliver,
+			CancellationToken cancellationToken)
+		{
+			// 같은 지급 안의 갱신은 하나씩 한다(동시에 들어와 둘 다 구독 잠금을 기다리면 먼저 잡은 쪽의 잠금이 지급 끝까지 풀리지 않아 교착)
+			await transaction.Serial.WaitAsync(cancellationToken);
+
+			try
+			{
+				if (!transaction.Holds(gate))
+				{
+					await gate.WaitAsync(cancellationToken);
+					transaction.Hold(gate);
+				}
+
+				if (!transaction.TryGetStaged(key, out var stored))
+				{
+					_subscriptions.TryGetValue(key, out stored);
+				}
+
+				var candidate = await next(stored, cancellationToken);
+
+				if (candidate == null)
+				{
+					return SubscriptionUpdateOutcome.Skipped;
+				}
+
+				await deliver(candidate, cancellationToken);
+				transaction.Stage(key, candidate);
+				return SubscriptionUpdateOutcome.Delivered;
+			}
+			finally
+			{
+				transaction.Serial.Release();
 			}
 		}
 
@@ -246,6 +306,98 @@ namespace Geuneda.Iap.Server
 			finally
 			{
 				gate.Release();
+			}
+		}
+
+		/// <summary>
+		/// 지급 하나가 쥔 구독 잠금과 함께 저장할 구독 스냅숏입니다. 지급이 끝나면 닫혀, 콜백이 기다리지 않은 작업이 그 뒤에 쓰거나 잠그려 하면 예외입니다(잠금이 새거나 저장이 사라지지 않게).
+		/// </summary>
+		private sealed class GrantTransaction
+		{
+			private readonly object _sync = new object();
+			private readonly List<SemaphoreSlim> _gates = new List<SemaphoreSlim>();
+			private readonly Dictionary<(string Store, string SubscriptionId), SubscriptionUpdate> _staged = new Dictionary<(string, string), SubscriptionUpdate>();
+			private bool _closed;
+
+			/// <summary>이 지급 안의 구독 갱신을 하나씩 하게 합니다</summary>
+			public SemaphoreSlim Serial { get; } = new SemaphoreSlim(1, 1);
+
+			public bool Holds(SemaphoreSlim gate)
+			{
+				lock (_sync)
+				{
+					ThrowIfClosed();
+					return _gates.Contains(gate);
+				}
+			}
+
+			/// <summary>잡은 구독 잠금을 맡깁니다. 그사이 지급이 끝났으면 잠금을 풀고 예외입니다.</summary>
+			public void Hold(SemaphoreSlim gate)
+			{
+				lock (_sync)
+				{
+					if (!_closed)
+					{
+						_gates.Add(gate);
+						return;
+					}
+				}
+
+				gate.Release();
+				ThrowClosed();
+			}
+
+			public bool TryGetStaged((string, string) key, out SubscriptionUpdate update)
+			{
+				lock (_sync)
+				{
+					ThrowIfClosed();
+					return _staged.TryGetValue(key, out update);
+				}
+			}
+
+			public void Stage((string, string) key, SubscriptionUpdate update)
+			{
+				lock (_sync)
+				{
+					ThrowIfClosed();
+					_staged[key] = update;
+				}
+			}
+
+			/// <summary>지급을 기록할 때 저장할 스냅숏을 돌려주고 닫습니다.</summary>
+			public IReadOnlyList<KeyValuePair<(string Store, string SubscriptionId), SubscriptionUpdate>> Complete()
+			{
+				lock (_sync)
+				{
+					_closed = true;
+					return _staged.ToList();
+				}
+			}
+
+			/// <summary>닫고, 쥔 구독 잠금을 돌려줍니다(지급이 실패했으면 보류한 스냅숏은 버림).</summary>
+			public IReadOnlyList<SemaphoreSlim> Close()
+			{
+				lock (_sync)
+				{
+					_closed = true;
+					var gates = _gates.ToList();
+					_gates.Clear();
+					return gates;
+				}
+			}
+
+			private void ThrowIfClosed()
+			{
+				if (_closed)
+				{
+					ThrowClosed();
+				}
+			}
+
+			private static void ThrowClosed()
+			{
+				throw new InvalidOperationException("A subscription update ran after its grant finished; await ledger calls inside the grant callback");
 			}
 		}
 	}

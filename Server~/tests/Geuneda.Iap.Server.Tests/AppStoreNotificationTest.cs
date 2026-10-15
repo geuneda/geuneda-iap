@@ -22,16 +22,31 @@ namespace Geuneda.Iap.Server.Tests
 			_signer.Dispose();
 		}
 
-		private Task<IapTestServer> StartAsync(Action<AppStoreOptions> configure = null)
+		private Task<IapTestServer> StartAsync(Action<AppStoreOptions> configure = null, bool hooked = false, TestLogSink logs = null)
 		{
-			return IapTestServer.StartAsync(iap => iap.AddAppStore(options =>
+			return IapTestServer.StartAsync(iap =>
 				{
-					options.BundleId = TestAppleSigner.BundleId;
-					options.OnlineChecks = false;
-					options.AppAppleId = AppAppleId;
-					options.RootCertificates.Add(_signer.RootDer);
-					configure?.Invoke(options);
-				}).AddNotificationHandler<TestNotificationHandler>(ServiceLifetime.Singleton),
+					iap.AddAppStore(options =>
+					{
+						options.BundleId = TestAppleSigner.BundleId;
+						options.OnlineChecks = false;
+						options.AppAppleId = AppAppleId;
+						options.RootCertificates.Add(_signer.RootDer);
+						configure?.Invoke(options);
+					}).AddNotificationHandler<TestNotificationHandler>(ServiceLifetime.Singleton);
+
+					if (hooked)
+					{
+						iap.AddLedger<HookedLedger>(ServiceLifetime.Singleton);
+					}
+				},
+				services: services =>
+				{
+					if (logs != null)
+					{
+						services.AddSingleton<Microsoft.Extensions.Logging.ILoggerProvider>(logs);
+					}
+				},
 				map: app => app.MapGeunedaIapAppStoreNotifications("/iap"));
 		}
 
@@ -129,25 +144,92 @@ namespace Geuneda.Iap.Server.Tests
 			Assert.Equal(0, server.Grantor.Calls);
 		}
 
-		[Fact]
-		public async Task Refund_reversed_after_a_closed_redeem_restores_the_account()
+		[Theory]
+		[InlineData(false)]
+		[InlineData(true)]
+		public async Task Refund_reversed_after_a_closed_redeem_is_left_to_support(bool refundedSignature)
 		{
-			// 모두 환불된 거래의 지급 요청은 지급 없이 닫지만 계정은 기록해, 나중에 환불이 취소되면 그 계정에 돌려준다(리뷰 2b 3회차)
-			await using var server = await StartAsync();
-			var beforeRefund = _signer.Sign(TestAppleSigner.Transaction("2000000999", "com.test.gem100"));
+			// 모두 환불된 거래의 지급 요청은 환불 전·후 서명 모두 계정을 기록하지 않고 닫는다. 지급하지 않은 계정이 구독 소유자·환불 취소 수취인이 되지 않고,
+			// 나중의 환불 취소는 고객 지원이 Warning 로그(지급 요청의 계정, 환불 취소의 거래)로 지급한다(리뷰 2b 4·5회차, 사용자 결정)
+			var logs = new TestLogSink();
+			await using var server = await StartAsync(logs: logs);
+			var refunded = TestAppleSigner.Transaction("2000000999", "com.test.gem100", revocationDate: SignedAt);
+			var signature = _signer.Sign(refundedSignature ? refunded : TestAppleSigner.Transaction("2000000999", "com.test.gem100"));
 
-			await server.PostAsync(Route, Notification("REFUND", TestAppleSigner.Transaction("2000000999", "com.test.gem100", revocationDate: SignedAt)));
-			var (_, closed) = await server.RedeemAsync(IapTestServer.Request(IapStoreNames.AppleAppStore, "gem_100", "2000000999", beforeRefund), "account-7");
-			var (_, again) = await server.RedeemAsync(IapTestServer.Request(IapStoreNames.AppleAppStore, "gem_100", "2000000999", beforeRefund), "account-7");
+			await server.PostAsync(Route, Notification("REFUND", refunded));
+			var (_, closed) = await server.RedeemAsync(IapTestServer.Request(IapStoreNames.AppleAppStore, "gem_100", "2000000999", signature), "account-7");
 			Assert.Equal(200, await server.PostAsync(Route, Notification("REFUND_REVERSED", TestAppleSigner.Transaction("2000000999", "com.test.gem100"),
 				signedDate: SignedAt + 60_000)));
 
 			Assert.Equal(IapRedeemCodes.Revoked, closed.Code());
-			Assert.Equal(IapRedeemCodes.Revoked, again.Code());
 			Assert.Equal(0, server.Grantor.Calls);
-			var reversal = Assert.Single(server.Notifications.Reversals);
-			Assert.Equal("account-7", reversal.AccountId);
-			Assert.Equal(1, reversal.Quantity);
+			Assert.Empty(server.Notifications.Reversals);
+			var record = await server.Ledger.FindAsync(IapStoreNames.AppleAppStore, "2000000999", System.Threading.CancellationToken.None);
+			Assert.False(record.IsGranted);
+			Assert.Equal(0, record.RefundedQuantity);
+			Assert.Null(await server.Ledger.FindByOriginalTransactionAsync(IapStoreNames.AppleAppStore, "1000000000000001", System.Threading.CancellationToken.None));
+			Assert.True(logs.Contains("2000000999", "account-7", "without granting"));
+			Assert.True(logs.Contains("2000000999", "reversed the refund"));
+		}
+
+		[Theory]
+		[InlineData(false)]
+		[InlineData(true)]
+		public async Task Subscription_notification_without_a_purchase_date_is_retried(bool hasSnapshot)
+		{
+			// 구매 시각은 결제 기간의 기준이라 없으면 오래된 알림으로 버려진다. 상태를 바꾸지 않고 503 으로 다시 받는다(리뷰 2b 10회차)
+			await using var server = await StartAsync();
+			var transaction = TestAppleSigner.Transaction("2000000555", "com.test.vip.month", expiresDate: IapTestServer.Now.AddDays(-1).ToUnixTimeMilliseconds());
+
+			if (hasSnapshot)
+			{
+				Assert.Equal(200, await server.PostAsync(Route, Notification("DID_RENEW", transaction, Renewal(), 1)));
+			}
+
+			var undated = new Dictionary<string, object>(transaction);
+			undated.Remove("purchaseDate");
+			var grace = IapTestServer.Now.AddDays(3).ToUnixTimeMilliseconds();
+
+			Assert.Equal(503, await server.PostAsync(Route, Notification("DID_FAIL_TO_RENEW", undated, Renewal(billingRetry: true, graceUntil: grace), 4,
+				signedDate: SignedAt + 60_000)));
+			Assert.Equal(hasSnapshot ? 1 : 0, server.Notifications.Subscriptions.Count);
+		}
+
+		[Fact]
+		public async Task Older_notification_of_the_same_period_is_ignored()
+		{
+			// 같은 결제 기간(같은 거래) 안에서는 늦게 서명된 알림이 이긴다. 먼저 서명된 결제 재시도 알림이 늦게 와도 이용 중을 되돌리지 않는다
+			await using var server = await StartAsync();
+			var transaction = TestAppleSigner.Transaction("2000000555", "com.test.vip.month", expiresDate: IapTestServer.Now.AddDays(30).ToUnixTimeMilliseconds());
+
+			Assert.Equal(200, await server.PostAsync(Route, Notification("DID_RENEW", transaction, Renewal(), 1, signedDate: SignedAt + 60_000)));
+			Assert.Equal(200, await server.PostAsync(Route, Notification("DID_FAIL_TO_RENEW", transaction, Renewal(billingRetry: true), 3)));
+
+			Assert.Equal(IapSubscriptionState.Active, Assert.Single(server.Notifications.Subscriptions).State);
+		}
+
+		[Fact]
+		public async Task Subscription_owner_is_read_inside_the_subscription_lock()
+		{
+			// 잠금 밖에서 읽은 옛 소유자가, 그사이 다른 알림이 저장한 새 소유자를 덮지 않는다(리뷰 2b 4회차 — 잠금 밖 조회로 되돌리면 [b, a] 로 실패)
+			await using var server = await StartAsync(hooked: true);
+			var ledger = (HookedLedger) server.Services.GetRequiredService<IPurchaseLedger>();
+			var release = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+			ledger.HoldFirstSubscriptionUpdate = release.Task;
+			await server.GrantAsync(IapStoreNames.AppleAppStore, "1000000000000001", "vip_month", account: "account-a", storeProductId: "com.test.vip.month");
+			var expires = IapTestServer.Now.AddDays(30).ToUnixTimeMilliseconds();
+
+			var newer = server.PostAsync(Route, Notification("DID_RENEW", TestAppleSigner.Transaction("2000000556", "com.test.vip.month", expiresDate: expires),
+				Renewal(), 1, signedDate: SignedAt + 60_000));
+			await ledger.FirstSubscriptionUpdateEntered.Task;
+			await server.GrantAsync(IapStoreNames.AppleAppStore, "2000000555", "vip_month", account: "account-b", storeProductId: "com.test.vip.month",
+				originalTransactionId: "1000000000000001", redeemedAt: IapTestServer.Now.AddMinutes(1));
+			Assert.Equal(200, await server.PostAsync(Route, Notification("DID_RENEW", TestAppleSigner.Transaction("2000000555", "com.test.vip.month",
+				expiresDate: expires), Renewal(), 1)));
+			release.SetResult(true);
+
+			Assert.Equal(200, await newer);
+			Assert.Equal(new[] { "account-b", "account-b" }, server.Notifications.Subscriptions.Select(update => update.AccountId));
 		}
 
 		[Theory]

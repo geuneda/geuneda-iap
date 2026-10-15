@@ -3,6 +3,7 @@ using System.Net.Http;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.DependencyInjection;
 using Xunit;
 
 namespace Geuneda.Iap.Server.Tests
@@ -37,6 +38,28 @@ namespace Geuneda.Iap.Server.Tests
 			Assert.Equal(IapTestServer.DefaultAccount, record.AccountId);
 			Assert.Equal(IapTestServer.Now, record.RedeemedAt);
 			Assert.Contains("\"gems\":100", record.GrantResponse);
+		}
+
+		[Fact]
+		public async Task Ledger_retry_of_the_grant_callback_does_not_keep_the_first_attempts_refund()
+		{
+			// DB 원장은 커밋 충돌 때 롤백하고 콜백을 다시 부른다. 첫 시도가 본 '모두 환불'이, 다시 부른 시도(그사이 환불 취소)의 지급 미룸을
+			// Revoked 로 바꿔 클라이언트가 거래를 닫게 하지 않는다(리뷰 2b 4회차 — 시도마다 초기화를 빼면 Revoked 로 실패)
+			await using var server = await IapTestServer.StartAsync(iap => iap.AddFakeStore().AddLedger<HookedLedger>(ServiceLifetime.Singleton));
+			var ledger = (HookedLedger) server.Services.GetRequiredService<IPurchaseLedger>();
+			ledger.FirstAttemptPreGrant = new PurchaseRecord
+			{
+				Store = IapStoreNames.Fake, TransactionId = "tx-1", AccountId = null, ProductId = "gem_100", Quantity = 1, RefundedQuantity = 1
+			};
+			server.Grantor.Enqueue(GrantResult.RetryLater("inventory is busy"));
+
+			var (_, deferred) = await server.RedeemAsync(IapTestServer.Request(IapStoreNames.Fake, "gem_100", "tx-1"));
+			var (_, granted) = await server.RedeemAsync(IapTestServer.Request(IapStoreNames.Fake, "gem_100", "tx-1"));
+
+			Assert.Equal(IapRedeemStatus.RetryLater, deferred.Status());
+			Assert.Equal(IapRedeemCodes.GrantDeferred, deferred.Code());
+			Assert.Equal(IapRedeemStatus.Granted, granted.Status());
+			Assert.Equal(2, server.Grantor.Calls);
 		}
 
 		[Fact]
