@@ -144,6 +144,7 @@ namespace Geuneda.Iap
 		{
 			var storeOrder = entry.StoreOrder;
 			var confirmedNow = false;
+			var serverManaged = entry.Fulfillment.Response is IIapRedeemResponse;
 			var closed = false;
 			string failure = null;
 
@@ -183,7 +184,17 @@ namespace Geuneda.Iap
 							break;
 						case IapConfirmStatus.AlreadyConfirmed:
 							closed = true;
-							Logger.Warning($"{entry.Order} was already closed in the store: {call.Value.Message}");
+
+							if (serverManaged)
+							{
+								// 결제 서버가 지급하면서 먼저 확인한 결제(Google acknowledge)
+								Logger.Info($"{entry.Order} was already acknowledged by the server: {call.Value.Message}");
+							}
+							else
+							{
+								Logger.Warning($"{entry.Order} was already closed in the store: {call.Value.Message}");
+							}
+
 							break;
 						default:
 							failure = $"The store did not confirm: {call.Value.Reason} {call.Value.Message}";
@@ -210,7 +221,11 @@ namespace Geuneda.Iap
 			var settlement = new PurchaseSettlement(entry.Order, entry.Fulfillment, closed,
 				entry.Purchase != null && !entry.Purchase.Waiter.IsCompleted);
 
-			if (confirmedNow)
+			// 매출 지점은 거래마다 한 번이어야 하므로 근거를 하나만 쓴다. 결제 서버 응답이면 원장의 첫 지급(Granted, 거래당 한 번),
+			// 그 밖은 스토어의 첫 확정(Confirmed)이다. 둘을 섞으면 여러 기기가 같은 거래를 처리할 때 두 번 잡힌다(2026-10-15 리뷰 2회차)
+			var revenuePoint = closed && (serverManaged ? entry.Fulfillment.Status == FulfillmentStatus.Granted : confirmedNow);
+
+			if (revenuePoint)
 			{
 				Raise(PurchaseConfirmed, settlement, nameof(PurchaseConfirmed));
 			}

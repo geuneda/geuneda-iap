@@ -1,0 +1,27 @@
+{
+    "name": "Geuneda.Iap.Http",
+    "rootNamespace": "Geuneda.Iap.Http",
+    "references": [
+        "Geuneda.Iap",
+        "Geuneda.Core",
+        "Geuneda.Http",
+        "UniTask"
+    ],
+    "includePlatforms": [],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": [
+        "GEUNEDA_IAP_HTTP"
+    ],
+    "versionDefines": [
+        {
+            "name": "com.geuneda.http",
+            "expression": "0.1.0",
+            "define": "GEUNEDA_IAP_HTTP"
+        }
+    ],
+    "noEngineReferences": false
+}

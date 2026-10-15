@@ -45,8 +45,9 @@ namespace Geuneda.Iap
 		event Action<IapOrderFailure> OrderFailed;
 
 		/// <summary>
-		/// 스토어가 거래 확정을 성공으로 알렸습니다. 거래마다 한 번이라 매출 기록은 여기서만 합니다
-		/// (이미 다른 곳에서 닫힌 거래는 오지 않음). 지급자 응답(<see cref="PurchaseSettlement.Fulfillment"/>)에 서버가 확인한 실결제 금액을 담아 쓸 수 있습니다.
+		/// 매출 지점입니다. 거래마다 한 번이라 매출 기록은 여기서만 합니다. 이 기기에서 거래를 닫았고, 지급 결과가 결제 서버 응답(<see cref="IIapRedeemResponse"/>)이면
+		/// 서버의 첫 지급(<see cref="FulfillmentStatus.Granted"/>, 서버가 Google 결제를 먼저 확인해 스토어가 '이미 닫힘'이라고 해도 포함), 그 밖은 스토어의 첫 확정(이미 다른 곳에서 닫힌 거래는 오지 않음)일 때 옵니다.
+		/// 지급자 응답(<see cref="PurchaseSettlement.Fulfillment"/>)에 서버가 확인한 실결제 금액을 담아 쓸 수 있습니다.
 		/// analytics 가 있으면 <c>Geuneda.Iap.Analytics.IapRevenueLogger</c> 가 구독합니다
 		/// </summary>
 		event Action<PurchaseSettlement> PurchaseConfirmed;

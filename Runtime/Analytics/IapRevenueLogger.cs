@@ -16,6 +16,7 @@ namespace Geuneda.Iap.Analytics
 	/// 금액은 실결제 금액이어야 합니다. 상품 조회 때의 표시 가격(<see cref="IapOrder.Price"/>)은 무료 체험·할인·프로모션 코드·가격 변경 전 결제와 다를 수 있습니다.
 	/// 서버가 영수증 검증으로 확인한 금액과 거래 통화를 지급자 응답에 담아 <c>paidAmount</c> 로 돌려주세요(이전 실행의 결제를 복구하면 상품 조회 통화가 결제 때와 다를 수 있음).
 	/// 기본값은 구독은 기록하지 않고(무료 체험·첫 달 할인이 흔함) 그 밖은 표시 가격과 상품 조회 통화를 씁니다. null 을 돌려주면 그 구매는 기록하지 않습니다.
+	/// 지급 결과가 결제 서버 응답(<see cref="IIapRedeemResponse"/>, <c>HttpPurchaseFulfiller</c>)이면 기본값은 테스트 결제와 환불된 거래를 빼고, 서버가 확인한 금액·통화가 있으면 그것을 씁니다.
 	/// </para>
 	/// <para>통화 코드를 모르면(상품 정보를 받지 못한 주문) 기록하지 않고 Warning 을 남깁니다.</para>
 	/// </remarks>
@@ -32,7 +33,7 @@ namespace Geuneda.Iap.Analytics
 		/// <param name="iap">구매를 받을 서비스</param>
 		/// <param name="analytics">기록할 서비스</param>
 		/// <param name="sinks">보낼 sink. null 이면 analytics 의 기본 sink</param>
-		/// <param name="paidAmount">실결제 금액과 통화. null 을 돌려주면 기록하지 않음. 생략하면 <see cref="DefaultPaidAmount"/></param>
+		/// <param name="paidAmount">수량을 포함한 총 실결제 금액과 통화. null 을 돌려주면 기록하지 않음. 생략하면 <see cref="DefaultPaidAmount"/></param>
 		public IapRevenueLogger(IIapService iap, IAnalyticsService analytics, AnalyticsSinks? sinks = null,
 			Func<PurchaseSettlement, IapPaidAmount?> paidAmount = null)
 		{
@@ -43,9 +44,26 @@ namespace Geuneda.Iap.Analytics
 			_iap.PurchaseConfirmed += OnPurchaseConfirmed;
 		}
 
-		/// <summary>구독은 null(기록 안 함), 그 밖은 상품 조회 때의 표시 가격과 통화입니다. 통화를 모르면 null 입니다.</summary>
+		/// <summary>
+		/// 총 실결제 금액입니다. 지급 결과가 결제 서버 응답(<see cref="IIapRedeemResponse"/>)이면 테스트 결제·환불된 거래(<see cref="IapRedeemCodes.Revoked"/>)는 null,
+		/// 서버가 확인한 총액이 있으면 그 총액·통화입니다. 그 밖은 구독은 null(기록 안 함), 그 밖은 상품 조회 때의 표시 가격 × 서버가 확인한 수량(모르면 1)과 통화입니다.
+		/// 통화를 모르면 null 입니다.
+		/// </summary>
 		public static IapPaidAmount? DefaultPaidAmount(PurchaseSettlement settlement)
 		{
+			if (settlement.Fulfillment.Response is IIapRedeemResponse redeem)
+			{
+				if (redeem.IsTest || redeem.Code == IapRedeemCodes.Revoked)
+				{
+					return null;
+				}
+
+				if (redeem.PaidAmount != null && !string.IsNullOrEmpty(redeem.PaidCurrency))
+				{
+					return new IapPaidAmount(redeem.PaidAmount.Value, redeem.PaidCurrency);
+				}
+			}
+
 			var order = settlement.Order;
 
 			if (order.Definition?.Type == IapProductType.Subscription || order.CurrencyCode == null)
@@ -53,7 +71,7 @@ namespace Geuneda.Iap.Analytics
 				return null;
 			}
 
-			return new IapPaidAmount(order.Price, order.CurrencyCode);
+			return new IapPaidAmount(order.Price * QuantityOf(settlement), order.CurrencyCode);
 		}
 
 		public void Dispose()
@@ -86,8 +104,10 @@ namespace Geuneda.Iap.Analytics
 				return;
 			}
 
+			// 금액은 총액이고 이벤트는 단가 × 수량이다. 수량은 결제 서버가 확인한 값(그 밖은 1)
+			var quantity = QuantityOf(settlement);
 			var title = string.IsNullOrEmpty(order.ProductTitle) ? null : order.ProductTitle;
-			var purchase = new AnalyticsPurchase(order.ProductId, (double) amount.Amount, amount.CurrencyCode, 1, order.TransactionId, title);
+			var purchase = new AnalyticsPurchase(order.ProductId, (double) (amount.Amount / quantity), amount.CurrencyCode, quantity, order.TransactionId, title);
 
 			if (_sinks.HasValue)
 			{
@@ -97,6 +117,11 @@ namespace Geuneda.Iap.Analytics
 			{
 				_analytics.LogPurchase(purchase);
 			}
+		}
+
+		private static int QuantityOf(PurchaseSettlement settlement)
+		{
+			return settlement.Fulfillment.Response is IIapRedeemResponse redeem && redeem.Quantity > 1 ? redeem.Quantity : 1;
 		}
 
 		private static bool IsCurrencyCode(string code)

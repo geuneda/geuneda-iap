@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- ASP.NET Core 결제 서버 라이브러리. 요청·응답 DTO 와 상품 종류는 Unity 패키지(Runtime)의 것을 링크해 한 곳에서 관리한다 -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <RootNamespace>Geuneda.Iap.Server</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="Geuneda.Iap.Server.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+    <PackageReference Include="Google.Apis.Auth" Version="1.77.0" />
+  </ItemGroup>
+
+  <ItemGroup Label="Unity 패키지와 공유">
+    <Compile Include="$(IapRuntimeDir)Protocol/*.cs" LinkBase="Shared/Protocol" />
+    <Compile Include="$(IapRuntimeDir)IapProductType.cs" Link="Shared/IapProductType.cs" />
+  </ItemGroup>
+</Project>

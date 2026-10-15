@@ -11,6 +11,9 @@
 | 결과 코드 | `IapResultCodes`(7000 블록) |
 | 스토어 어댑터 계약 | `IIapStore`, `IapStoreOrder`, `IapStoreOrders`, `IapStorePurchaseFailure`, `IapStoreFailureReason`, `IapConfirmResult` |
 | 매출 기록(analytics 가 있을 때) | `Geuneda.Iap.Analytics.IapRevenueLogger`, `IapPaidAmount` |
+| 결제 서버 와이어 형식 | `IapRedeemRequest`, `IapRedeemResponse<TGrant>`, `IIapRedeemResponse`, `IapRedeemStatus`, `IapRedeemCodes`, `IapStoreNames`, `IapRoutes`, `IapRedeemResults` |
+| 결제 서버 HTTP 지급자(http 가 있을 때) | `Geuneda.Iap.Http.HttpPurchaseFulfiller<TGrant>` |
+| 결제 서버(.NET, `Server~`) | `Geuneda.Iap.Server`: 영수증 검증(Google Play, App Store), 영수증 유일성 원장, 지급 엔드포인트 |
 
 네임스페이스는 `Geuneda.Iap` 입니다.
 
@@ -33,7 +36,7 @@
 |---|---|
 | `com.geuneda.iap.unity` | Unity IAP 5.4.4(`StoreController`) 어댑터 `UnityIapStore`. Unity 2022.3 이상 |
 
-`com.geuneda.analytics` 0.2.0 이상이 있으면 `Geuneda.Iap.Analytics` 어셈블리가 켜집니다(asmdef `versionDefines`).
+`com.geuneda.analytics` 0.2.0 이상이 있으면 `Geuneda.Iap.Analytics` 어셈블리가, `com.geuneda.http` 0.1.0 이상이 있으면 `Geuneda.Iap.Http` 어셈블리(결제 서버 HTTP 지급자)가 켜집니다(asmdef `versionDefines`).
 
 ## 사용 예
 
@@ -88,6 +91,26 @@ public sealed class ShopFulfiller : IPurchaseFulfiller
 	}
 }
 ```
+
+결제 서버(`Server~`, 아래 [결제 서버](#결제-서버server))를 쓰면 지급자를 만들지 않고 HTTP 지급자를 씁니다. 응답(`IapRedeemResponse<TGrant>`)에 서버 지급자의 결과와 스토어가 확인한 실결제 금액이 옵니다.
+
+```csharp
+using Geuneda.Http;
+using Geuneda.Iap.Http;
+
+// 기본 주소는 서버 접두사까지(MapGeunedaIap("/iap") 면 .../iap/). access 토큰은 account 의 AuthTokenMiddleware 가 붙입니다
+var http = new HttpClientBuilder()
+	.WithBaseAddress("https://game.example.com/iap/")
+	.AddMiddleware(new AuthTokenMiddleware(auth))
+	.Build();
+var fulfiller = new HttpPurchaseFulfiller<ShopGrant>(http);   // ShopGrant: 서버 지급자가 돌려주는 보상 형식
+
+// 지급 결과: ((IapRedeemResponse<ShopGrant>) settlement.Fulfillment.Response).Grant
+```
+
+매출(`IapRevenueLogger`)의 기본 규칙은 응답이 결제 서버의 것(`IIapRedeemResponse`)이면 테스트 결제와 환불된 거래(`Revoked`)를 빼고 서버가 확인한 금액·통화를 씁니다(없으면 아래 표시 가격 규칙). `paidAmount` 를 넘기지 않아도 됩니다.
+
+실시간 RPC 처럼 다른 경로로 서버를 부르면 `order.ToRedeemRequest()` 로 요청을 만들고 서버 응답을 `response.ToFulfillmentResult()` 로 바꿉니다(응답이 없거나 상태를 모르면 거래를 열어 두는 `RetryLater`).
 
 ```csharp
 using Geuneda.Core;
@@ -153,7 +176,7 @@ else
 
 로그인한 직후와 실시간 연결이 다시 붙은 직후에는 `RecoverAsync()` 를 부릅니다. 복원 버튼은 `RestoreAsync()` 입니다(돌려받은 보유 주문을 서버에 보내 권한을 다시 줍니다). 앱 시작과 포그라운드 복귀 때는 서비스가 스스로 다시 조회합니다.
 
-매출은 스토어 확정이 성공한 한 곳(`PurchaseConfirmed`)에서만 기록합니다. 금액은 실결제 금액이어야 하므로, 서버가 영수증 검증으로 확인한 금액과 거래 통화를 지급자 응답에 담아 `IapPaidAmount` 로 돌려주세요(이전 실행의 결제를 복구하면 상품 조회 통화가 결제 때와 다를 수 있음). 생략하면 구독은 기록하지 않고(무료 체험·첫 달 할인) 그 밖은 상품 조회 때의 표시 가격과 통화를 씁니다.
+매출은 거래마다 한 번인 매출 지점(`PurchaseConfirmed`)에서만 기록합니다. 근거는 하나만 씁니다. 지급 결과가 결제 서버 응답이면 서버 원장의 첫 지급(`Granted`, 거래당 한 번)을 받은 기기가 거래를 닫을 때이고(서버가 Google 결제를 먼저 확인해 스토어가 '이미 닫힘'이라고 해도), 그 밖의 지급자는 스토어의 첫 확정(`Confirmed`)입니다. 둘을 섞으면 여러 기기가 같은 거래를 처리할 때 두 번 잡힙니다. 첫 지급 응답이 유실되면(서버는 지급했지만 클라이언트가 응답을 못 받고 다시 보내 `Duplicate` 를 받음) 클라이언트 매출 이벤트는 빠지므로, 정확한 매출 집계는 서버 원장(`PurchaseRecord` 의 `PaidAmount`, `IsTest`, `RedeemedAt`)으로 하세요. 금액은 실결제 총액이어야 하므로, 서버가 영수증 검증으로 확인한 금액과 거래 통화를 지급자 응답에 담아 `IapPaidAmount` 로 돌려주세요(이전 실행의 결제를 복구하면 상품 조회 통화가 결제 때와 다를 수 있음). 생략하면 구독은 기록하지 않고(무료 체험·첫 달 할인) 그 밖은 상품 조회 때의 표시 가격과 통화를 씁니다. 결제 서버 응답이면 서버가 확인한 수량으로 단가 × 수량을 기록합니다.
 
 ```csharp
 using Geuneda.Iap.Analytics;
@@ -185,7 +208,7 @@ var revenue = new IapRevenueLogger(iap, analytics, paidAmount: settlement =>
 - **종류를 모르는 주문은 확정하지 않습니다.** 스토어나 정의가 모르는 상품의 주문은 지급도 확정도 하지 않고 `OrderFailed`(`UnknownProduct`)로 알립니다. Google 은 종류를 모르는 주문을 확정하면 소비 대신 승인만 해서 영구 보유 상태가 됩니다. 판매를 그만둔 상품도 정의에서 빼지 마세요. 이미 받은 거래가 종류를 모르거나 다른 상품으로 다시 와도 검증한 원본을 덮어쓰지 않습니다. 같은 거래가 새 영수증으로 다시 오면 다음 지급 시도는 새 영수증을 씁니다.
 - **구매·복원은 한 번에 하나입니다**(`InProgress`).
 
-서버가 지켜야 하는 것:
+서버가 지켜야 하는 것(결제 서버 헬퍼가 지킴):
 
 - **영수증(또는 거래 ID)을 유일 키로 저장하고 지급과 같은 트랜잭션에서 처리합니다.** 검증만 하고 지급을 클라이언트가 따로 저장하면, 그 사이에 앱이 죽었을 때 재시도가 '이미 쓴 영수증'으로 거절되어 지급이 영구히 누락됩니다.
 - **같은 영수증이 다시 오면 `AlreadyGranted` 로 답합니다**(오류 아님). 지급자는 시간 초과 뒤 같은 주문을 다시 보낼 수 있습니다.
@@ -215,6 +238,121 @@ var revenue = new IapRevenueLogger(iap, analytics, paidAmount: settlement =>
 | 7015 `UnknownProduct` | 종류를 모르는 주문(`OrderFailed` 로만) | 예 |
 | 7016 `ConfirmFailed` | 지급 뒤 확정만 실패(`OrderFailed` 로만) | 예(지급됨) |
 
+## 결제 서버(`Server~`)
+
+ASP.NET Core(.NET 10) 라이브러리 `Geuneda.Iap.Server` 입니다. 지급 요청을 받아 스토어에 검증하고, 영수증 유일성 원장과 같은 트랜잭션에서 게임 지급자를 부릅니다. 와이어 형식(`Runtime/Protocol`)과 상품 종류는 Unity 패키지 파일을 링크해 함께 씁니다.
+
+```
+Server~/
+  Geuneda.Iap.Server.slnx
+  src/Geuneda.Iap.Server/          라이브러리
+  tests/Geuneda.Iap.Server.Tests/  xUnit
+  samples/Geuneda.Iap.SampleServer/ 가짜 스토어 + 메모리 원장 샘플
+```
+
+```csharp
+using Geuneda.Iap;
+using Geuneda.Iap.Server;
+
+builder.Services.AddGeunedaIap(options =>
+	{
+		options.Products.Add(new IapServerProduct("gem_100", IapProductType.Consumable));
+		options.Products.Add(new IapServerProduct("no_ads", IapProductType.NonConsumable));
+		options.Products.Add(new IapServerProduct("vip_month", IapProductType.Subscription, googlePlayId: "vip_month", appStoreId: "com.game.vip.month"));
+	})
+	.AddGooglePlay(options =>
+	{
+		options.PackageName = "com.company.game";
+		options.ServiceAccountKeyJson = secrets.GooglePlayKey;   // 없으면 키 파일, 그것도 없으면 Application Default Credentials
+	})
+	.AddAppStore(options => options.BundleId = "com.company.game")
+	.AddGrantor<ShopGrantor>()     // 게임 지급(요청 범위)
+	.AddLedger<SqlPurchaseLedger>(); // 게임 DB 원장(요청 범위). 개발은 AddInMemoryLedger(), 에디터 가짜 스토어는 AddFakeStore()(Production 금지)
+
+var app = builder.Build();
+
+// account 의 access 토큰으로 계정을 확인합니다. null 이면 401
+app.MapGeunedaIap("/iap", async context =>
+{
+	var header = context.Request.Headers.Authorization.ToString();
+	var token = header.StartsWith("Bearer ") ? header.Substring(7) : null;
+	var validation = await context.RequestServices.GetRequiredService<IAccessTokenValidator>().ValidateAsync(token, context.RequestAborted);
+	return validation.IsValid ? validation.AccountId : null;
+});
+```
+
+```csharp
+public sealed class ShopGrantor : IPurchaseGrantor
+{
+	private readonly GameDb _db;   // 원장과 같은 요청 범위 DB 컨텍스트
+
+	public ShopGrantor(GameDb db)
+	{
+		_db = db;
+	}
+
+	public async Task<GrantResult> GrantAsync(PurchaseGrant grant, CancellationToken cancellationToken)
+	{
+		// 원장 트랜잭션 안. 여기서 쓴 것은 원장 기록과 함께 커밋되거나 함께 롤백됩니다
+		var rewards = await _db.GiveAsync(grant.AccountId, grant.Product.Id, grant.Purchase.Quantity, cancellationToken);
+		return GrantResult.Granted(new ShopGrant { Rewards = rewards });
+	}
+}
+```
+
+처리 순서(`IPurchaseRedeemer`, HTTP 밖에서 직접 부를 수도 있음):
+
+1. 요청 검사(스토어, 상품 목록, 거래 ID). 서버 상품 목록에 없는 상품은 거절합니다.
+2. 원장 확인. 이미 기록한 거래면 스토어를 부르지 않고 답합니다. 같은 계정이면 처음 지급 응답과 함께 `Duplicate`, 다른 계정이면 지급 없이 `OwnedByOtherAccount`(둘 다 `AlreadyGranted` 라 클라이언트가 거래를 닫음).
+3. 스토어 검증.
+4. 원장 트랜잭션 안에서 지급자를 부르고, 지급했으면 지급 응답과 함께 기록해 커밋합니다. 같은 거래의 동시 요청은 원장이 하나만 통과시킵니다.
+5. Google 은 지급을 기록한 뒤 결제를 확인(acknowledge)합니다(`AcknowledgeAfterGrant`, 기본 켜짐). 클라이언트가 확정하기 전에 앱이 지워져도 3일 자동 환불이 일어나지 않습니다. 소비는 하지 않습니다(서버가 소비하면 클라이언트 확정이 '구매 없음'으로 실패).
+   확인할 결제(Google 이 '확인됨'이라고 분명히 답하지 않은 모든 결제)는 지급과 같은 트랜잭션에서 원장에 다음 시도 시각(`PurchaseRecord.AcknowledgementDueAt`)으로 남습니다. 커밋 직후 확인이 실패하거나 그 사이 서버가 죽어도, 확인 작업자(호스트 서비스)가 시작할 때와 `AcknowledgementRetryInterval`(기본 5분)마다 시각이 된 기록을 모두 다시 확인합니다(실패한 기록은 다음 간격 뒤로 미뤄 뒤의 기록을 막지 않음). 확인이 거절되면 결제 상태를 다시 읽어 이미 확인·소비·취소됐으면 끝내고, 결제 뒤 3일이 지나면 Error 로그를 남기고 그만둡니다.
+
+원장(`IPurchaseLedger`)은 게임 DB 로 구현합니다. (Store, TransactionId) 에 유일 제약을 두고 한 트랜잭션에서 (1) 기록이 있으면 `Duplicate`, (2) 없으면 지급 콜백(지급자의 쓰기도 이 트랜잭션 안), (3) 지급했으면 기록 추가 후 커밋합니다. 동시 요청이 유일 제약에 걸리면 지급까지 함께 롤백하고 이긴 기록을 읽어 `Duplicate` 로 돌려줍니다. 확인 대기 기록 조회(`FindDueAcknowledgementsAsync(now, limit)`, 시각 순), 표시 해제(`MarkAcknowledgedAsync`), 미루기(`DeferAcknowledgementAsync`, 이미 해제된 기록은 되돌리지 않음)도 구현합니다(`AcknowledgementDueAt` 에 색인). 지급자와 원장이 같은 요청 범위 DB 컨텍스트·세션을 받게 등록합니다. App Store 와 Mac App Store 는 거래 ID 공간이 같아 원장 스토어는 `AppleAppStore` 하나입니다(`IStoreVerifier.LedgerStore`).
+
+검증 규칙:
+
+| 스토어 | 방법 | 지급 | 거래만 닫음(`AlreadyGranted` `Revoked`) | 다시 시도(`RetryLater`) | 거절(`Rejected`) |
+|---|---|---|---|---|---|
+| Google Play | 구매 토큰으로 Android Publisher API 조회(일회성 `productsv2`, 구독 `subscriptionsv2`). 서비스 계정에 '주문 및 구독 관리' 권한 | PURCHASED, 구독은 결제 대기·결제 전 취소 밖의 모든 상태(만료 포함, 상태와 만료 시각을 지급자에 넘김) | CANCELLED, 결제 전에 취소된 구독 | PENDING, 네트워크·시간 초과·429·5xx, 401·403(서비스 계정 권한, Error 로그), 모르는 상태, 상품 목록이 없거나 상품 ID 가 빈 응답 | 400·404·410(모르는 토큰), 상품 목록에 요청 상품이 없음 |
+| App Store·Mac App Store | `SignedTransaction`(StoreKit 2 JWS)을 Apple 공식 라이브러리 `SignedDataVerifier` 와 같은 규칙으로 검증: ES256, x5c 3개, 인증서 OID, 내장 Apple Root CA - G3 까지 체인, 온라인 검사(지금 시각, OCSP). 체인 신뢰는 인증서 내려받기 없이 먼저 확인하고 신뢰한 체인에만 OCSP 를 묻습니다(공격자 인증서의 주소로 서버가 요청하지 않게) | Production, Sandbox(`AllowSandbox`, 기본 켜짐, App Store 심사가 운영 서버에 샌드박스 결제를 보냄) | `revocationDate` 있음(환불·철회) | OCSP 에 닿지 못함 | 서명·체인 오류, 다른 번들 ID, 거래 ID·상품 불일치, Xcode·LocalTesting |
+| 가짜 스토어(`fake`) | 검증 없음(개발 서버 전용) | 항상 | | | |
+
+테스트 결제(Google 라이선스 테스터, 샌드박스, 가짜 스토어)는 응답의 `IsTest` 가 true 입니다. `AllowTestPurchases` 를 끄면 거절합니다(심사 구매도 실패하니 주의). 실결제 금액은 App Store 는 거래 서명의 `price`·`currency`, Google 은 `ReadOrderTotal`(주문 API, '재무 데이터 보기' 권한, 실패해도 지급)을 켰을 때만 옵니다.
+
+엔드포인트 `POST {prefix}/purchases` 의 응답:
+
+| HTTP | 경우 |
+|---|---|
+| 200 | 그 밖의 모든 결과(본문의 `status` 로 구분) |
+| 400 | 형식 오류, 필수 필드 없음(`BadRequest`) |
+| 401 | 계정 확인 실패(`Unauthorized`, 클라이언트는 다시 시도) |
+| 413, 415 | 본문 초과(`MaxRequestBytes`, 기본 1MB), JSON 아님 |
+| 500 | 지급자·원장 예외. 지급 트랜잭션 안이면 롤백(기록 안 됨), 커밋 뒤 확인 표시 중이면 이미 지급됨. 어느 쪽이든 클라이언트가 같은 거래로 다시 보내 지급받거나 `Duplicate` 를 받음 |
+
+이유 코드(`IapRedeemCodes`, 7100~7199):
+
+| 코드 | 상태 | 뜻 |
+|---|---|---|
+| 0 `None` | Granted | 이번에 지급 |
+| 7101 `Duplicate` | AlreadyGranted | 이 계정에 이미 지급(처음 지급 응답을 다시 줌) |
+| 7102 `OwnedByOtherAccount` | AlreadyGranted | 다른 계정에 지급한 거래(지급 없음) |
+| 7103 `Revoked` | AlreadyGranted | 환불·취소된 거래(지급 없음) |
+| 7104 `InvalidReceipt` | Rejected | 서명·형식 오류, 스토어가 모르는 거래 |
+| 7105 `AppMismatch` | Rejected | 다른 앱의 거래 |
+| 7106 `ProductMismatch` | Rejected | 서버 상품 목록에 없거나 거래 상품이 다름 |
+| 7107 `UnsupportedStore` | Rejected | 서버에 검증기가 없는 스토어 |
+| 7108 `EnvironmentNotAllowed` | Rejected | 허용하지 않은 환경(샌드박스, 테스트 결제, Xcode) |
+| 7109 `PaymentPending` | RetryLater | 결제 대기 |
+| 7110 `StoreUnavailable` | RetryLater | 스토어 API 를 쓸 수 없음 |
+| 7111 `GrantRejected` | Rejected | 게임 지급자가 거절 |
+| 7112 `GrantDeferred` | RetryLater | 게임 지급자가 나중에 |
+| 7113 `BadRequest` | Rejected | 요청 형식 오류(HTTP 400) |
+| 7114 `Unauthorized` | RetryLater | 계정 확인 실패(HTTP 401) |
+
+실행: `dotnet test "Server~/Geuneda.Iap.Server.slnx"`. 샘플 서버는 `dotnet run --project "Server~/samples/Geuneda.Iap.SampleServer" --no-launch-profile -- --urls http://127.0.0.1:5499` 로 띄우고, Unity 상호 운용 테스트(`SampleServerInteropTest`)는 `GEUNEDA_IAP_INTEROP_URL=http://127.0.0.1:5499/iap/` 로 이름을 골라 실행합니다.
+
 ## 스토어 어댑터 만들기
 
 `IIapStore` 를 구현합니다. 서비스가 순서·중복·재시도·시간 제한을 맡으므로 어댑터는 SDK 호출과 형식 변환만 합니다.
@@ -230,9 +368,13 @@ var revenue = new IapRevenueLogger(iap, analytics, paidAmount: settlement =>
 - `Payload` 는 메모리에만 있습니다. 앱을 다시 시작한 뒤 복구한 주문은 `Payload` 가 null 입니다. 지급에 꼭 필요한 선택은 결제 전에 서버에 저장하거나 복구 때 다시 물으세요. 승인 대기(`Deferred`) 결제가 같은 상품의 새 결제창과 겹쳐 승인되면 새 구매의 것으로 보일 수 있습니다.
 - 이번 실행에서 거절(`Rejected`)한 주문은 `RecoverAsync`, 같은 상품 구매, 다음 실행 때만 다시 시도합니다. Google 은 3일 안에 확정하지 않은 결제를 자동 환불합니다.
 - 구독 만료·갱신 판정은 서버가 합니다. `CheckEntitlementAsync` 는 기기의 스토어 계정 기준입니다.
-- 실제 Google Play·App Store 결제는 이 패키지 테스트에서 확인하지 않았습니다(어댑터는 Unity IAP 가짜 스토어로 확인).
+- 실제 Google Play·App Store 결제는 이 패키지 테스트에서 확인하지 않았습니다(어댑터는 Unity IAP 가짜 스토어로, 서버 검증은 가짜 Android Publisher API 와 Apple 과 같은 모양의 테스트 인증서로 확인). 실제 Apple 인증서의 OCSP 확인도 확인하지 않았습니다.
+- 서버는 클라이언트가 구매 때 넣은 계정 표시(Google `obfuscatedAccountId`, App Store `appAccountToken`)를 지급자에 넘기기만 하고 확인하지 않습니다(`VerifiedPurchase.AccountToken`). 어댑터는 아직 이 값을 넣지 않습니다.
+- 이전 서버가 이미 지급한 결제는 새 원장에 없으므로, 원장을 옮기지 않고 바꾸면 남은 거래가 다시 지급될 수 있습니다. `FindAsync` 가 이전 기록도 보게 구현하세요.
 
 ## 테스트
 
 - `Geuneda.Iap.Tests.EditMode`: 가짜 스토어·지급자·수동 지연으로 구매, 지급 재시도와 백오프, 확정만 재시도, 시간 초과와 늦은 결제, 승인 대기, 중복 거래, 같은 상품 미확정 주문, 거래 중복 제거, 복구·재조회·복원, 종류 모르는 주문, 초기화 실패와 복귀 재시도, 종료, 다른 스레드에서 끝난 지급, 재진입(처리기의 복구·종료)과 조회·결제창 경합(`IapServiceRaceTest`).
-- `Geuneda.Iap.Analytics.Tests.EditMode`: 확정 성공 한 번만 매출 기록, 실결제 금액, 구독 기본 제외.
+- `Geuneda.Iap.Analytics.Tests.EditMode`: 확정 성공 한 번만 매출 기록(서버가 먼저 확인한 첫 지급 포함), 실결제 금액, 구독 기본 제외, 결제 서버 응답의 금액·테스트 결제·환불.
+- `Geuneda.Iap.Http.Tests.EditMode`: 응답 → 지급 결과 변환(확실하지 않으면 다시 시도), 요청 본문, 샘플 서버 상호 운용(`SampleServerInteropTest`, 명시 실행).
+- `Server~/tests/Geuneda.Iap.Server.Tests`: 원장(한 번만 지급, 동시 요청, 지급자 거절·예외 롤백, 확인 대기), 중복·다른 계정, 요청 검사, Google(상태별 결과, HTTP 상태, 시간 초과, 상품 목록 누락, 확인 호출, 확인 실패 뒤 작업자 재시도·이미 확인된 결제·3일 기한, 원장 장애에도 작업자 유지, 주문 금액), App Store(서명·체인·OID·환경·번들·환불·만료 인증서·온라인 검사, 신뢰하지 않는 체인의 AIA·OCSP 주소로 요청하지 않음, Mac App Store 공유 원장), 시작 검사.

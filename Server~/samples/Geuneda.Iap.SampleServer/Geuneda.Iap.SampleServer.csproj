@@ -1,0 +1,11 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+  <!-- 가짜 스토어와 메모리 원장을 쓰는 샘플 결제 서버. Unity 상호 운용 테스트(Tests/EditMode/Http)가 이 서버에 붙는다 -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <RootNamespace>Geuneda.Iap.SampleServer</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../../src/Geuneda.Iap.Server/Geuneda.Iap.Server.csproj" />
+  </ItemGroup>
+</Project>

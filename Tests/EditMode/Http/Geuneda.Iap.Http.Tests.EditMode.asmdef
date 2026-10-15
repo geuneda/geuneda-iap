@@ -1,0 +1,36 @@
+{
+    "name": "Geuneda.Iap.Http.Tests.EditMode",
+    "rootNamespace": "",
+    "references": [
+        "UnityEngine.TestRunner",
+        "UnityEditor.TestRunner",
+        "Geuneda.Core",
+        "Geuneda.Http",
+        "Geuneda.Iap",
+        "Geuneda.Iap.Http",
+        "UniTask"
+    ],
+    "includePlatforms": [
+        "Editor"
+    ],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": true,
+    "precompiledReferences": [
+        "nunit.framework.dll",
+        "Newtonsoft.Json.dll"
+    ],
+    "autoReferenced": false,
+    "defineConstraints": [
+        "UNITY_INCLUDE_TESTS",
+        "GEUNEDA_IAP_HTTP"
+    ],
+    "versionDefines": [
+        {
+            "name": "com.geuneda.http",
+            "expression": "0.1.0",
+            "define": "GEUNEDA_IAP_HTTP"
+        }
+    ],
+    "noEngineReferences": false
+}

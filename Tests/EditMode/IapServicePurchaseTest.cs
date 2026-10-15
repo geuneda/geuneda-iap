@@ -292,6 +292,62 @@ namespace Geuneda.Iap.Tests
 			Assert.That(Delay.PendingCount(RetryDelay), Is.Zero);
 		}
 
+		private static FulfillmentResult ServerAnswer(IapRedeemStatus status, int code = IapRedeemCodes.None)
+		{
+			var response = new IapRedeemResponse<object> { Status = status, Code = code, Quantity = 1 };
+			return status == IapRedeemStatus.Granted ? FulfillmentResult.Granted(response) : FulfillmentResult.AlreadyGranted(response, "code " + code);
+		}
+
+		[Test]
+		public void ServerGrant_AlreadyAcknowledgedByTheServer_RecordsRevenueOnce()
+		{
+			// 결제 서버가 지급하면서 Google 결제를 확인하면 비소모성의 클라이언트 확정은 이미 닫힌 거래(AlreadyConfirmed)로 끝난다
+			Initialize();
+			CompletePurchasesImmediately();
+			Fulfiller.Next(ServerAnswer(IapRedeemStatus.Granted));
+			Store.ConfirmHandler = order => UniTask.FromResult(IapConfirmResult.AlreadyConfirmed("acknowledged by the server"));
+
+			var result = Purchase(Gem);
+
+			Assert.That(result.Value.Value.IsConfirmed, Is.True);
+			Assert.That(Confirmed, Has.Count.EqualTo(1));
+			Assert.That(Settled, Has.Count.EqualTo(1));
+		}
+
+		[Test]
+		public void ServerDuplicate_ConfirmedOnThisDevice_RecordsNoRevenue()
+		{
+			// 다른 기기·요청이 서버의 첫 지급(Granted)을 받았다. 이 기기가 스토어 확정에 먼저 성공해도 매출은 그쪽에서 한 번만 잡힌다
+			Initialize();
+			CompletePurchasesImmediately();
+			Fulfiller.Next(ServerAnswer(IapRedeemStatus.AlreadyGranted, IapRedeemCodes.Duplicate));
+
+			var result = Purchase(Gem);
+
+			Assert.That(result.Value.Value.IsConfirmed, Is.True);
+			Assert.That(Store.ConfirmCalls, Has.Count.EqualTo(1));
+			Assert.That(Confirmed, Is.Empty);
+		}
+
+		[Test]
+		public void ServerGrant_ConfirmedAfterARetry_RecordsRevenueOnce()
+		{
+			Initialize();
+			CompletePurchasesImmediately();
+			Fulfiller.Next(ServerAnswer(IapRedeemStatus.Granted));
+			var attempts = 0;
+			Store.ConfirmHandler = order => UniTask.FromResult(++attempts == 1
+				? IapConfirmResult.Failed(IapStoreFailureReason.StoreUnavailable, "offline")
+				: IapConfirmResult.Confirmed());
+
+			Purchase(Gem);
+			Assert.That(Confirmed, Is.Empty);
+			Clock.Elapsed += RetryDelay;
+			Delay.Complete(RetryDelay);
+
+			Assert.That(Confirmed, Has.Count.EqualTo(1));
+		}
+
 		[Test]
 		public void StoreTimeout_ReturnsTimeout_AndALatePaymentIsFulfilledInTheBackground()
 		{

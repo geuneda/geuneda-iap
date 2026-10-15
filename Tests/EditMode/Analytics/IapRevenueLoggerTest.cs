@@ -48,6 +48,53 @@ namespace Geuneda.Iap.Tests
 		}
 
 		[Test]
+		public void ServerResponse_UsesTheVerifiedAmount_AndSkipsTestAndRevokedPurchases()
+		{
+			using (new IapRevenueLogger(Service, _analytics))
+			{
+				Initialize();
+				CompletePurchasesImmediately();
+				Fulfiller.Next(FulfillmentResult.Granted(new IapRedeemResponse<object> { Status = IapRedeemStatus.Granted, PaidAmount = 990m, PaidCurrency = "JPY" }));
+				Fulfiller.Next(FulfillmentResult.Granted(new IapRedeemResponse<object> { Status = IapRedeemStatus.Granted, IsTest = true, PaidAmount = 1m, PaidCurrency = "USD" }));
+				Fulfiller.Next(FulfillmentResult.AlreadyGranted(new IapRedeemResponse<object> { Status = IapRedeemStatus.AlreadyGranted, Code = IapRedeemCodes.Revoked }));
+				Fulfiller.Next(FulfillmentResult.Granted(new IapRedeemResponse<object> { Status = IapRedeemStatus.Granted }));
+
+				Purchase(Gem);
+				Purchase(Gem);
+				Purchase(Gem);
+				Purchase(Gem);
+
+				Assert.That(_analytics.Events, Has.Count.EqualTo(2), "test and revoked purchases are not revenue");
+				Assert.That(_analytics.Events[0].Parameters[AnalyticsStandardParameters.Price], Is.EqualTo(990d));
+				Assert.That(_analytics.Events[0].Parameters[AnalyticsStandardParameters.Currency], Is.EqualTo("JPY"));
+				Assert.That(_analytics.Events[1].Parameters[AnalyticsStandardParameters.Price], Is.EqualTo(1100d), "no server amount falls back to the store price");
+			}
+		}
+
+		[Test]
+		public void ServerQuantity_SplitsTheTotalOrMultipliesTheStorePrice()
+		{
+			// 서버 금액은 수량을 포함한 총액(App Store price, Google 주문 total)이다. 이벤트는 단가 × 수량으로 기록한다
+			using (new IapRevenueLogger(Service, _analytics))
+			{
+				Initialize();
+				CompletePurchasesImmediately();
+				Fulfiller.Next(FulfillmentResult.Granted(new IapRedeemResponse<object>
+					{ Status = IapRedeemStatus.Granted, Quantity = 3, PaidAmount = 3000m, PaidCurrency = "KRW" }));
+				Fulfiller.Next(FulfillmentResult.Granted(new IapRedeemResponse<object> { Status = IapRedeemStatus.Granted, Quantity = 3 }));
+
+				Purchase(Gem);
+				Purchase(Gem);
+
+				Assert.That(_analytics.Events, Has.Count.EqualTo(2));
+				Assert.That(_analytics.Events[0].Parameters[AnalyticsStandardParameters.Price], Is.EqualTo(1000d));
+				Assert.That(_analytics.Events[0].Parameters[AnalyticsStandardParameters.Quantity], Is.EqualTo(3));
+				Assert.That(_analytics.Events[1].Parameters[AnalyticsStandardParameters.Price], Is.EqualTo(1100d));
+				Assert.That(_analytics.Events[1].Parameters[AnalyticsStandardParameters.Quantity], Is.EqualTo(3));
+			}
+		}
+
+		[Test]
 		public void FailedConfirmation_IsLoggedOnlyWhenTheRetrySucceeds()
 		{
 			using (new IapRevenueLogger(Service, _analytics))
@@ -81,6 +128,23 @@ namespace Geuneda.Iap.Tests
 				Purchase(Gem);
 
 				Assert.That(_analytics.Events, Is.Empty);
+			}
+		}
+
+		[Test]
+		public void FirstGrantAcknowledgedByTheServer_IsLoggedOnce()
+		{
+			// 결제 서버가 Google 결제를 지급하면서 확인하면 클라이언트 확정은 AlreadyConfirmed 로 끝나지만, 이번 지급이 첫 지급이라 매출이다
+			using (new IapRevenueLogger(Service, _analytics))
+			{
+				Initialize();
+				CompletePurchasesImmediately();
+				Fulfiller.Next(FulfillmentResult.Granted(new IapRedeemResponse<object> { Status = IapRedeemStatus.Granted, Quantity = 1 }));
+				Store.ConfirmHandler = order => UniTask.FromResult(IapConfirmResult.AlreadyConfirmed());
+
+				Purchase(Gem);
+
+				Assert.That(_analytics.Events, Has.Count.EqualTo(1));
 			}
 		}
 

@@ -1,0 +1,10 @@
+<Project>
+  <!-- Server~ 아래 모든 .NET 프로젝트의 공통 설정. 클라이언트(Unity) 파일을 링크하므로 nullable 은 끈다 -->
+  <PropertyGroup>
+    <LangVersion>latest</LangVersion>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <IapRuntimeDir>$(MSBuildThisFileDirectory)../Runtime/</IapRuntimeDir>
+  </PropertyGroup>
+</Project>

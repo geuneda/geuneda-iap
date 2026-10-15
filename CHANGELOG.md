@@ -4,6 +4,22 @@
 이 형식은 [Keep a Changelog](http://keepachangelog.com/en/1.0.0/)를 기반으로 하며,
 이 프로젝트는 [Semantic Versioning](http://semver.org/spec/v2.0.0.html)을 따릅니다.
 
+## [Unreleased]
+
+**New**:
+- 결제 서버 헬퍼 `Server~/src/Geuneda.Iap.Server`(ASP.NET Core, .NET 10): `AddGeunedaIap`(상품 목록 `IapServerProduct`) → `AddGooglePlay`·`AddAppStore`·`AddFakeStore`·`AddVerifier<T>`, `AddGrantor<T>`, `AddLedger<T>`·`AddInMemoryLedger`, 엔드포인트 `MapGeunedaIap(prefix, resolveAccountId)`(`POST {prefix}/purchases`), 직접 호출용 `IPurchaseRedeemer`
+- 영수증 유일성 원장 `IPurchaseLedger`: 원장 기록과 게임 지급(`IPurchaseGrantor`)을 한 트랜잭션으로 묶음. 같은 계정의 중복은 처음 지급 응답과 함께 `AlreadyGranted`(`Duplicate`), 다른 계정은 지급 없이 `AlreadyGranted`(`OwnedByOtherAccount`). 원장에 있으면 스토어를 부르지 않음. App Store·Mac App Store 는 원장 스토어 하나(`IStoreVerifier.LedgerStore`)
+- Google Play 검증(Android Publisher API `productsv2`·`subscriptionsv2`, 서비스 계정·ADC): PURCHASED 만 지급, PENDING 은 다시 시도, CANCELLED 는 지급 없이 닫음, 401·403·429·5xx·시간 초과·모르는 상태는 다시 시도. 지급 기록 뒤 서버 확인(acknowledge, 소비는 안 함)으로 3일 자동 환불 방지. 선택: 주문 API 로 실결제 금액
+- App Store 검증(StoreKit 2 JWS): Apple 공식 `SignedDataVerifier` 와 같은 규칙(ES256, 인증서 3개, OID, 내장 Apple Root CA - G3, 온라인 검사), 번들 ID, 환경(샌드박스 허용 기본), 거래 ID·상품 일치, 환불·철회는 지급 없이 닫음, 실결제 금액(`price`·`currency`)
+- 공유 와이어 형식(`Runtime/Protocol`): `IapRedeemRequest`, `IapRedeemResponse<TGrant>`, `IapRedeemStatus`, 이유 코드 `IapRedeemCodes`(7100~7199), `IapStoreNames`, `IapRoutes`. 변환 `IapRedeemResults.ToRedeemRequest`·`ToFulfillmentResult`(응답이 없거나 상태를 모르면 `RetryLater`)
+- 선택 어셈블리 `Geuneda.Iap.Http`(com.geuneda.http 0.1.0 이상): `HttpPurchaseFulfiller<TGrant>`
+- 확인 대기와 재시도: 확인할 Google 결제(확인됨이라고 분명히 답하지 않은 것)는 지급과 같은 트랜잭션에서 `PurchaseRecord.AcknowledgementDueAt` 으로 기록하고, 확인 작업자(호스트 서비스)가 시작할 때와 `AcknowledgementRetryInterval` 마다 시각이 된 기록을 모두 다시 확인(실패는 다음 간격 뒤로 미룸, 이미 확인·소비·취소면 끝, 결제 뒤 3일이면 그만둠). 원장에 `FindDueAcknowledgementsAsync`·`MarkAcknowledgedAsync`·`DeferAcknowledgementAsync`
+- `IIapRedeemResponse`: 지급 결과 형식과 관계없이 서버 응답을 읽는 인터페이스
+
+**Changed**:
+- `PurchaseConfirmed`(매출 지점): 지급 결과가 결제 서버 응답(`IIapRedeemResponse`)이면 서버의 첫 지급(`Granted`)을 받은 기기가 거래를 닫을 때 한 번(스토어가 `AlreadyConfirmed` 여도, `AlreadyGranted` 면 `Confirmed` 여도 없음). 그 밖의 지급자는 전과 같이 스토어 `Confirmed` 때
+- `IapRevenueLogger`: 지급 결과가 결제 서버 응답이면 기본 금액은 테스트 결제·환불된 거래를 빼고 서버가 확인한 총액·통화, 수량은 서버가 확인한 수량(이벤트 단가 = 총액 ÷ 수량, 표시 가격으로 대체할 때는 표시 가격 × 수량)
+
 ## [0.1.0] - 2026-10-15
 
 **New**:

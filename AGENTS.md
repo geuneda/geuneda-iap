@@ -5,7 +5,7 @@
 ## 1. 패키지 개요
 - **패키지**: `com.geuneda.iap`
 - **Unity**: 2021.3+ (Unity IAP 어댑터 `com.geuneda.iap.unity` 는 2022.3+)
-- **의존성**: `com.geuneda.core` 0.4.0(ModuleLogger, Result, `IMonotonicClock`, `MainThreadDispatcher`), `com.cysharp.unitask`. analytics 는 선택입니다(있으면 `Geuneda.Iap.Analytics` 가 `versionDefines` 의 define `GEUNEDA_IAP_ANALYTICS` 로 켜짐. 이 define 은 그 asmdef 안에서만 정의되므로 다른 어셈블리에서 `#if` 로 쓰지 않습니다)
+- **의존성**: `com.geuneda.core` 0.4.0(ModuleLogger, Result, `IMonotonicClock`, `MainThreadDispatcher`), `com.cysharp.unitask`. analytics 는 선택입니다(있으면 `Geuneda.Iap.Analytics` 가 `versionDefines` 의 define `GEUNEDA_IAP_ANALYTICS` 로 켜짐. 이 define 은 그 asmdef 안에서만 정의되므로 다른 어셈블리에서 `#if` 로 쓰지 않습니다). http 도 선택입니다(있으면 `Geuneda.Iap.Http` 가 define `GEUNEDA_IAP_HTTP` 로 켜짐). 결제 서버(`Server~`)는 .NET 10, ASP.NET Core, Google.Apis.Auth 1.77.0 입니다
 - **스토어 SDK**: 결정 D3 에 따라 어댑터 패키지(`com.geuneda.iap.unity`)로 붙입니다. 이 패키지에 SDK 참조를 넣지 않습니다
 - **출처**: Lucky Defense 의 Percent Purchase 와 게임 상점 코드(로드맵 4-2). 따른 것: 서버 지급 뒤 Confirm, '이미 지급' 응답도 Confirm, 구매·복구 상호 배제, 같은 상품 미확정 주문 먼저 사용, 중복 거래면 재조회, 결제창 동안만 핑퐁 중지(이벤트로 노출), 확정 성공 한 곳에서 매출 기록. 보완한 것(레퍼런스 약점): 복구 때 캐시가 아니라 항상 재조회, 앱 복귀·백오프 재시도(레퍼런스는 로비 진입·복원 버튼뿐), 시간 초과 뒤 늦게 끝난 결제도 지급(레퍼런스는 캐시에 안 들어가 재시작 전까지 누락), 확정만 실패하면 성공으로 알리고 확정만 재시도(레퍼런스는 실패 토스트), 원인별 결과 코드와 실패 이벤트(레퍼런스는 90000 하나, 원격 로그 없음), 실패 이유 명시 매핑(레퍼런스는 정수 7 을 중복 거래로 비교했으나 Unity IAP v5 에서 7 은 검증 실패). 사용자 게임(SpellDefense)의 교훈: 상품 조회 뒤에만 구매 조회, 종류를 모르는 주문은 확정 금지, Unity 자동 재전달 끄기, 결제창 콜백 시간 제한 뒤 늦은 결제 지급
 
@@ -18,12 +18,16 @@
 | `Runtime/IapService.Lane.cs` | 지급·확정 큐(`RunLaneAsync`, 주문 하나씩), 백오프와 깨우기 타이머 하나, 바깥 코드 호출 보호(`CallAsync`: 시간 제한·예외·메인 스레드 복귀), 이벤트 처리기 격리 |
 | `Runtime/Internal/` | `OrderEntry`(거래 하나의 상태), `PurchaseRequest`, `Waiter`(호출자 한 명의 결과 자리), `CallResult`, `IapLifecycle`(숨은 수명 컴포넌트) |
 | `Runtime/Analytics/` | `IapRevenueLogger`(선택 어셈블리) |
+| `Runtime/Protocol/` | 결제 서버 와이어 형식(요청·응답 DTO, 이유 코드, 스토어 이름, 경로). `Server~` 가 링크해 함께 컴파일하므로 core·UniTask·UnityEngine 을 쓰지 않습니다(`IapProductType.cs` 도 링크됨) |
+| `Runtime/IapRedeemResults.cs` | 주문 → 요청, 응답 → 지급 결과 변환(상태를 모르면 `RetryLater`) |
+| `Runtime/Http/` | `HttpPurchaseFulfiller<TGrant>`(선택 어셈블리, http 있을 때 `GEUNEDA_IAP_HTTP`) |
+| `Server~/` | .NET 10 솔루션 `Geuneda.Iap.Server.slnx`: 라이브러리(`Redeem/` 처리 순서·엔드포인트, `Ledger/`, `Grants/`, `Verification/` 계약, `GooglePlay/`, `AppStore/`, `Fake/`), xUnit 테스트, 샘플 서버 |
 
 ## 3. 규칙
 
 - **확정 순서(불변식)**: 지급자가 `Granted`·`AlreadyGranted` 를 돌려준 주문만 `IIapStore.ConfirmAsync` 합니다. `RetryLater`·예외·시간 초과·정의되지 않은 상태(`default`)는 거래를 열어 두고 백오프, `Rejected` 는 열어 두고 자동 재시도하지 않음. 이 순서를 바꾸면 `IapServicePurchaseTest` 의 확정 순서·재시도 테스트가 실패합니다(되돌림 실험으로 확인, 2026-10-15).
-- **확정만 재시도**: 지급이 끝난 항목(`OrderEntry.Granted`)은 지급자를 다시 부르지 않습니다. `OrderSettled` 는 항목마다 한 번(`Announced`)이고 `PurchaseConfirmed(PurchaseSettlement)` 는 스토어가 `Confirmed` 를 줄 때만입니다(`AlreadyConfirmed` 는 매출 없음). 어댑터는 시간 초과 뒤 늦게 온 확정 성공을 다음 확정 요청에 돌려줘야 합니다(`IIapStore.ConfirmAsync` 계약).
-- **매출 금액**: `IapRevenueLogger` 는 `paidAmount`(`IapPaidAmount` 금액+통화, 기본 `DefaultPaidAmount`: 구독 null, 그 밖 표시 가격과 상품 조회 통화)로 정하고 null 이면 기록하지 않습니다. 표시 가격은 무료 체험·할인·프로모션과 다르고(리뷰 1회차), 복구한 주문은 상품 조회 통화가 결제 통화와 다를 수 있습니다(리뷰 2회차).
+- **확정만 재시도**: 지급이 끝난 항목(`OrderEntry.Granted`)은 지급자를 다시 부르지 않습니다. `OrderSettled` 는 항목마다 한 번(`Announced`)이고 `PurchaseConfirmed(PurchaseSettlement)` 는 거래마다 한 번인 매출 지점이고 근거는 하나입니다: 지급 결과가 결제 서버 응답(`IIapRedeemResponse`)이면 이 기기가 거래를 닫았고 지급이 `Granted`(서버 원장의 첫 지급)일 때(스토어가 `AlreadyConfirmed` 여도, 서버가 Google 결제를 먼저 확인함), 그 밖은 스토어가 `Confirmed` 를 줄 때. 두 근거를 섞으면 여러 기기 경합에서 두 번 잡힙니다(리뷰 2회차: B 가 `AlreadyGranted`+`Confirmed`, A 가 `Granted`+`AlreadyConfirmed`). 첫 응답 유실 때의 누락은 클라이언트만으로 막을 수 없어 서버 원장 집계를 권합니다. 어댑터는 시간 초과 뒤 늦게 온 확정 성공을 다음 확정 요청에 돌려줘야 합니다(`IIapStore.ConfirmAsync` 계약).
+- **매출 금액**: `IapRevenueLogger` 는 `paidAmount`(`IapPaidAmount` 총액+통화, 기본 `DefaultPaidAmount`: 지급 결과가 결제 서버 응답 `IIapRedeemResponse` 면 테스트 결제·`Revoked` 는 null, 서버 총액이 있으면 그것. 그 밖은 구독 null, 표시 가격 × 서버 수량과 상품 조회 통화)로 정하고 null 이면 기록하지 않습니다. 이벤트는 총액 ÷ 서버 수량을 단가로, 서버 수량(그 밖은 1)을 수량으로 씁니다(App Store `price` 와 Google 주문 `total` 은 수량을 포함한 총액, Apple 문서로 확인). 표시 가격은 무료 체험·할인·프로모션과 다르고(리뷰 1회차), 복구한 주문은 상품 조회 통화가 결제 통화와 다를 수 있습니다(리뷰 2회차).
 - **버려진 호출의 토큰**: `CallAsync` 가 시간 초과로 버린 호출의 linked CTS 는 호출이 끝날 때 `InvokeAsync` 의 finally 가 해제합니다(서비스 수명 토큰에 등록이 쌓이지 않게). 취소와 해제가 엇갈리면 `CancelQuietly` 가 `ObjectDisposedException` 을 무시합니다.
 - **큐**: 지급·확정은 한 줄 큐에서 하나씩. 구매가 만든 주문은 큐 앞에 넣습니다. 초기화 전에는 큐를 돌리지 않습니다(상품 정보가 없어 가격이 0 인 주문이 됨). 지급자에 넘기는 `IapOrder` 는 `ProcessAsync` 가 지급 시도마다 최신 `StoreOrder`·상품 정보로 다시 만듭니다. `OrderState` 의 기본값은 `New` 입니다(기본값이 `Queued` 이면 새 주문이 큐에 들어가지 않음, 2026-10-15 실수).
 - **재조회 결과 자리**: 재조회 결과가 필요한 쪽(복구, 중복 거래)은 `FetchOrdersAsync(observer)` 의 관찰자 안에서 결과 자리를 겁니다. 조회가 바로 끝나면 돌려받은 태스크를 기다리기 전에 큐가 주문을 닫아 버리기 때문입니다. `RunFetchAsync` 는 수락 → 관찰자 → 결과 → 큐 순서입니다. 조회 중에 온 요청은 다음 조회(요청 뒤에 시작한 조회)의 결과를 받습니다.
@@ -44,14 +48,25 @@
 - **수명 컴포넌트**: 플레이 중에만 만들고 `HideInHierarchy` 만 붙입니다(servertime·analytics 와 같은 이유). `Dispose` 는 파괴 전에 `Unbind` 합니다.
 - **수명**: `IIapService` 는 `IDisposable` 입니다(`MainInstaller.CleanDispose<IIapService>()`).
 - **static 가변 상태 금지**(D2). 로거만 static 입니다.
-- **결과 코드**: 7000 블록(core README 표에 등록). 결제됐을 수 있는 코드(Timeout, Cancelled, Deferred, DuplicateTransaction, FulfillmentPending)는 README 표에 표시하고 '결제 실패' 안내 금지를 문서화합니다.
+- **서버 처리 순서(불변식)**: 원장 확인 → 스토어 검증 → 원장 트랜잭션 안의 지급 → 확인(Google). 원장에 이미 있으면 스토어를 부르지 않습니다. 지급자 결과가 `Granted` 일 때만 기록하고, `Rejected`·`RetryLater`·예외·정의되지 않은 값은 기록하지 않습니다(롤백). 지급자·원장 예외는 잡지 않아 500 이 되고 클라이언트가 다시 보냅니다. 스토어 확인(`AcknowledgeAsync`)은 커밋 뒤라 요청 토큰을 넘기지 않습니다.
+- **확실하지 않으면 닫지 않음**: 검증기가 모르는 상태·응답·네트워크 문제는 `Unavailable`(`RetryLater`)입니다. `Revoked`(거래만 닫음)와 `Invalid`(거절)는 스토어가 분명히 답했을 때만 씁니다. 잘못 닫으면 지급이 누락되고, 잘못 거절해도 이번 실행에서는 다시 시도하지 않습니다. 클라이언트 변환(`ToFulfillmentResult`, HTTP 지급자)도 같아서 5xx·본문 오류·모르는 상태는 `RetryLater` 입니다.
+- **원장 스토어**: 원장 키는 요청의 스토어 이름이 아니라 검증기의 `LedgerStore` 입니다. App Store 와 Mac App Store 는 거래 ID 공간이 같아 `AppleAppStore` 하나로 씁니다(다른 이름으로 같은 거래가 오면 두 번 지급되던 것을 리뷰 전에 발견, `AppStoreTest`).
+- **Google 확인과 소비**: 서버는 지급 뒤 확인(acknowledge)만 하고 소비하지 않습니다. Unity IAP 5.4.4 는 확인된 소모성을 여전히 미확정 주문으로 다뤄 클라이언트가 소비하고, 확인된 비소모성·구독을 다시 확정하면 DuplicateTransaction 실패를 주는데 어댑터가 `AlreadyConfirmed` 로 바꿉니다(소스로 확인, `GooglePurchaseConverter`·`GoogleFinishTransactionUseCase`). 서버가 소비하면 클라이언트 확정이 '구매 없음' 예외로 실패합니다.
+- **Apple 검증**: Apple 공식 라이브러리 규칙을 그대로 따릅니다(체인 길이 3, 잎 OID 1.2.840.113635.100.6.11.1, 중간 OID 1.2.840.113635.100.6.2.1, 온라인이면 지금 시각과 OCSP·아니면 `signedDate`, 폐기 상태를 모르면 다시 시도). 내장 루트는 Apple Root CA - G3(SHA-256 지문 테스트로 고정). x5c 의 루트는 보지 않고 신뢰 루트로 체인을 만듭니다.
+- **체인 검증 두 단계(SSRF)**: 1단계는 `DisableCertificateDownloads` + 폐기 확인 없음으로 신뢰 체인만 만들고, 통과한 체인에만 2단계 OCSP 를 묻습니다. JWS 서명·OID 는 공격자가 자체 인증서로 통과할 수 있어, 내려받기를 켜 두면 신뢰하지 않는 인증서의 AIA 주소(내부망)로 서버가 요청합니다(macOS 에서 이 설정을 빼면 수신기에 3번 연결됨을 확인, 리뷰 1회차). `Untrusted_chain_does_not_make_the_server_fetch_its_urls` 가 지킵니다.
+- **확인 대기와 작업자**: 확인할 결제(Google 이 `ACKNOWLEDGED` 라고 분명히 답하지 않은 것, 상태 없음·모르는 값 포함 — 리뷰 2회차)는 지급과 같은 트랜잭션에 `AcknowledgementDueAt`(지급 시각)으로 남기고, 커밋 직후 `AcknowledgeAsync` 가 true 면 `MarkAcknowledgedAsync` 합니다. `PendingAcknowledgementWorker`(AddGooglePlay 가 등록하는 호스트 서비스)가 시작할 때와 간격마다 시각이 된 기록을 배치(100)로 모두 처리하고, 실패한 기록은 `DeferAcknowledgementAsync` 로 다음 간격 뒤로 미뤄 다음 배치로 넘어갑니다(리뷰 2회차: 앞 100건 실패가 뒤를 막았음, `Failing_records_do_not_block_later_ones`). 회차당 최대 100배치. `Defer` 는 이미 해제된 기록을 대기로 되돌리지 않으므로 커밋 직후 확인과 작업자가 겹쳐도 됩니다. 한 회차의 예외는 Error 로그 후 다음 회차(BackgroundService 예외는 기본으로 호스트를 끄므로 이 루프만 예외를 잡음). Google 확인은 거절되면 상태를 다시 읽어 이미 확인·소비·취소면 끝내고, 결제 뒤 3일이 지나면 그만둡니다(리뷰 1회차: 확인 실패를 복구할 경로가 없었음).
+- **응답을 믿을 수 없으면 다시 시도**: Google 응답에 상품 목록이 없거나 상품 ID 가 빈 항목이 있으면 상품 불일치로 거절하지 않고 `Unavailable` 입니다(리뷰 1회차).
+- **시각**: 서버는 `TimeProvider` 를 씁니다(테스트는 `FakeTimeProvider`). Google RFC 3339 시각은 소수점 7자리(틱)로 자릅니다(나노초가 옴).
+- **결과 코드**: 7000 블록(core README 표에 등록). 7001~7099 는 클라이언트 결과 코드, 7100~7199 는 결제 서버 이유 코드(`IapRedeemCodes`)입니다. 결제됐을 수 있는 코드(Timeout, Cancelled, Deferred, DuplicateTransaction, FulfillmentPending)는 README 표에 표시하고 '결제 실패' 안내 금지를 문서화합니다.
 
 ## 4. 테스트
 
 - `Tests/EditMode/` (`Geuneda.Iap.Tests.EditMode`): `FakeStore`(스토어 상태를 들고, 확정하면 미확정 목록에서 뺌), `ScriptedFulfiller`(결과 순서·붙잡기), `ManualDelay`(길이별로 지연을 골라 끝냄 — 시간 설정이 길이마다 달라야 함), `FakeMonotonicClock`, `Captured<T>`(풀링된 UniTask 결과를 한 번만 읽음). 가짜가 바로 끝나는 UniTask 를 돌려주므로 대부분의 흐름이 호출 안에서 끝납니다. 구매·재시도·백오프·확정만 재시도·시간 초과·늦은 결제·승인 대기·중복 거래·미확정 주문 재사용·중복 제거·큐 순서·오용·처리기 예외·다른 스레드 완료(UnityTest), 복구·재조회 순서·관찰자·복귀·초기화 재시도·복원·보유, 종료·설정 검증·스레드.
 - `Tests/EditMode/Analytics/` (`Geuneda.Iap.Analytics.Tests.EditMode`): 기본 테스트 어셈블리의 `IapServiceTestBase` 를 참조합니다.
-- analytics 가 없는 프로젝트에서 선택 어셈블리가 빠지고 컴파일되는지는 core·iap 만 넣은 임시 프로젝트로 확인했습니다(2026-10-15). 선택 어셈블리의 참조나 `versionDefines` 를 바꾸면 다시 확인합니다.
+- `Tests/EditMode/Http/` (`Geuneda.Iap.Http.Tests.EditMode`): 가짜 `IHttpTransport` 로 응답 변환(JSON 설정은 지급자마다 비공개로 둠, 공유 가변 static 금지), `SampleServerInteropTest`(명시 실행, `GEUNEDA_IAP_INTEROP_URL`)는 샘플 서버와 실제로 주고받습니다.
+- `Server~/tests/Geuneda.Iap.Server.Tests` (xUnit, `dotnet test "Server~/Geuneda.Iap.Server.slnx"`): 127.0.0.1 빈 포트의 실제 Kestrel(`IapTestServer`), 가짜 Android Publisher API(`FakeGooglePlay`, `HttpMessageHandler`), Apple 과 같은 모양의 테스트 인증서 서명기(`TestAppleSigner`), 대본 지급자(`TestGrantor`). 개발 환경은 `Build()` 의 DI 검사가 먼저 실패하므로 `MapGeunedaIap` 의 시작 검사는 Production 환경으로 확인합니다. 확인 작업자는 테스트가 `RunOnceAsync` 로 직접 돌리고, 시간을 앞당기는 테스트는 간격을 길게 두어 작업자가 끼어들지 않게 합니다. 500 응답 본문은 개발자 예외 페이지(JSON 아님)입니다.
+- analytics·http 가 없는 프로젝트에서 선택 어셈블리가 빠지고 컴파일되는지는 core·iap 만 넣은 임시 프로젝트로 확인했습니다(2026-10-15). 선택 어셈블리의 참조나 `versionDefines` 를 바꾸면 다시 확인합니다.
 
 ## 5. 문서
 
-공개 API 를 바꾸면 `README.md`, `CHANGELOG.md`, 호스트 `claude-skills/geuneda-iap/` 스킬과 `claude-skills/geuneda-frameworks/`(패키지 표, `references/api.md` 카드)를 함께 고치고 `claude-skills/install.sh geuneda-iap`, `claude-skills/install.sh geuneda-frameworks` 로 각각 설치합니다(스크립트는 인자 하나만 받음). 어댑터 패키지가 `IIapStore` 계약에 의존하므로 계약을 바꾸면 `com.geuneda.iap.unity` 와 버전을 함께 올립니다.
+공개 API 를 바꾸면 `README.md`, `CHANGELOG.md`, 호스트 `claude-skills/geuneda-iap/` 스킬과 `claude-skills/geuneda-frameworks/`(패키지 표, `references/api.md` 카드)를 함께 고치고 `claude-skills/install.sh geuneda-iap`, `claude-skills/install.sh geuneda-frameworks` 로 각각 설치합니다(스크립트는 인자 하나만 받음). `Runtime/Protocol` 을 바꾸면 서버와 클라이언트가 함께 바뀌므로 서버 테스트와 상호 운용 테스트를 함께 돌립니다. 어댑터 패키지가 `IIapStore` 계약에 의존하므로 계약을 바꾸면 `com.geuneda.iap.unity` 와 버전을 함께 올립니다.
