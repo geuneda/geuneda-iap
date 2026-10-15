@@ -34,7 +34,7 @@ namespace Geuneda.Iap.Server.Tests
 
 			return Script.TryDequeue(out var step)
 				? step(grant, cancellationToken)
-				: Task.FromResult(GrantResult.Granted(new TestReward { Gems = 100 * grant.Purchase.Quantity, Product = grant.Product.Id }));
+				: Task.FromResult(GrantResult.Granted(new TestReward { Gems = 100 * grant.Quantity, Product = grant.Product.Id }));
 		}
 	}
 

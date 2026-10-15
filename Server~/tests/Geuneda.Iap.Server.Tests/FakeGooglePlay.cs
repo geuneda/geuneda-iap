@@ -24,6 +24,10 @@ namespace Geuneda.Iap.Server.Tests
 		/// <summary>구매 토큰별 확인 응답(없으면 <see cref="AcknowledgeStatus"/>)</summary>
 		public ConcurrentDictionary<string, HttpStatusCode> AcknowledgeStatuses { get; } = new ConcurrentDictionary<string, HttpStatusCode>();
 
+		/// <summary>구독 토큰별로 조회마다 하나씩 꺼내 쓰는 응답(지연 포함). 비면 <see cref="Subscriptions"/></summary>
+		public ConcurrentDictionary<string, ConcurrentQueue<(TimeSpan Delay, string Json)>> SubscriptionScripts { get; } =
+			new ConcurrentDictionary<string, ConcurrentQueue<(TimeSpan Delay, string Json)>>();
+
 		/// <summary>있으면 요청마다 이 예외를 던집니다(연결 실패)</summary>
 		public Exception Throw { get; set; }
 
@@ -75,7 +79,16 @@ namespace Geuneda.Iap.Server.Tests
 				return Json(AcknowledgeStatuses.TryGetValue(token, out var status) ? status : AcknowledgeStatus, "");
 			}
 
-			return Lookup(rest, "purchases/productsv2/tokens/", Products) ?? Lookup(rest, "purchases/subscriptionsv2/tokens/", Subscriptions) ??
+			const string subscriptionRoute = "purchases/subscriptionsv2/tokens/";
+
+			if (rest.StartsWith(subscriptionRoute, StringComparison.Ordinal) && SubscriptionScripts.TryGetValue(rest.Substring(subscriptionRoute.Length), out var script) &&
+			    script.TryDequeue(out var scripted))
+			{
+				await Task.Delay(scripted.Delay, cancellationToken);
+				return Json(HttpStatusCode.OK, scripted.Json);
+			}
+
+			return Lookup(rest, "purchases/productsv2/tokens/", Products) ?? Lookup(rest, subscriptionRoute, Subscriptions) ??
 			       Lookup(rest, "orders/", Orders) ?? Json(HttpStatusCode.NotFound, "{}");
 		}
 

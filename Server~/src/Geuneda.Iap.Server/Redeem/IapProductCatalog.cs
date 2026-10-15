@@ -8,18 +8,44 @@ namespace Geuneda.Iap.Server
 	internal sealed class IapProductCatalog
 	{
 		private readonly Dictionary<string, IapServerProduct> _products = new Dictionary<string, IapServerProduct>(StringComparer.Ordinal);
+		private readonly Dictionary<string, IapServerProduct> _googlePlay = new Dictionary<string, IapServerProduct>(StringComparer.Ordinal);
+		private readonly Dictionary<string, IapServerProduct> _appStore = new Dictionary<string, IapServerProduct>(StringComparer.Ordinal);
 
 		public IapProductCatalog(IOptions<IapServerOptions> options)
 		{
 			foreach (var product in options.Value.Products)
 			{
 				_products.Add(product.Id, product);
+				_googlePlay.Add(product.GooglePlayId, product);
+				_appStore.Add(product.AppStoreId, product);
 			}
 		}
 
 		public bool TryGet(string productId, out IapServerProduct product)
 		{
-			return _products.TryGetValue(productId, out product);
+			product = null;
+			return productId != null && _products.TryGetValue(productId, out product);
+		}
+
+		/// <summary>원장 스토어(<see cref="IapStoreNames.GooglePlay"/>, <see cref="IapStoreNames.AppleAppStore"/>)의 스토어 상품 ID 로 찾습니다(서버 알림).</summary>
+		public bool TryGetByStoreProductId(string store, string storeProductId, out IapServerProduct product)
+		{
+			product = null;
+
+			if (storeProductId == null)
+			{
+				return false;
+			}
+
+			switch (store)
+			{
+				case IapStoreNames.GooglePlay:
+					return _googlePlay.TryGetValue(storeProductId, out product);
+				case IapStoreNames.AppleAppStore:
+					return _appStore.TryGetValue(storeProductId, out product);
+				default:
+					return false;
+			}
 		}
 
 		/// <summary>상품이 하나도 없거나, null 이 있거나, 게임 ID·스토어 ID 가 겹치면 이유를, 아니면 null 을 돌려줍니다.</summary>

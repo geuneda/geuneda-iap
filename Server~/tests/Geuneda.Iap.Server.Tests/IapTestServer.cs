@@ -41,11 +41,12 @@ namespace Geuneda.Iap.Server.Tests
 		public InMemoryPurchaseLedger Ledger => _app.Services.GetRequiredService<InMemoryPurchaseLedger>();
 
 		public static async Task<IapTestServer> StartAsync(Action<IapServerBuilder> stores, Action<IapServerOptions> configure = null,
-			Action<IServiceCollection> services = null)
+			Action<IServiceCollection> services = null, Action<WebApplication> map = null)
 		{
 			var time = new FakeTimeProvider(Now);
 			var app = Build(time, stores, configure, services, "Development");
 			app.MapGeunedaIap("/iap", ResolveAccount);
+			map?.Invoke(app);
 			await app.StartAsync();
 
 			var address = app.Services.GetRequiredService<IServer>().Features.Get<IServerAddressesFeature>().Addresses.First();
@@ -106,6 +107,36 @@ namespace Geuneda.Iap.Server.Tests
 					var json = response.Content.Headers.ContentType?.MediaType == "application/json";
 					var body = json ? JsonSerializer.Deserialize<JsonElement>(await response.Content.ReadAsStringAsync()) : default;
 					return ((int) response.StatusCode, body);
+				}
+			}
+		}
+
+		public TestNotificationHandler Notifications => (TestNotificationHandler) _app.Services.GetRequiredService<IPurchaseNotificationHandler>();
+
+		/// <summary>원장에 지급 기록을 바로 넣습니다(알림 테스트의 사전 조건).</summary>
+		public Task GrantAsync(string store, string transactionId, string productId, int quantity = 1, string account = DefaultAccount, string orderId = null,
+			string storeProductId = null, string originalTransactionId = null)
+		{
+			var record = new PurchaseRecord
+			{
+				Store = store, TransactionId = transactionId, AccountId = account, ProductId = productId, StoreProductId = storeProductId ?? productId,
+				Quantity = quantity, OrderId = orderId, OriginalTransactionId = originalTransactionId, PurchasedAt = Now, RedeemedAt = Now
+			};
+			return Ledger.RedeemAsync(record, (_, _) => Task.FromResult(LedgerGrant.Granted(null)), System.Threading.CancellationToken.None);
+		}
+
+		public async Task<int> PostAsync(string path, string json, string bearer = null)
+		{
+			using (var message = new HttpRequestMessage(HttpMethod.Post, path) { Content = new StringContent(json, System.Text.Encoding.UTF8, "application/json") })
+			{
+				if (bearer != null)
+				{
+					message.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", bearer);
+				}
+
+				using (var response = await Http.SendAsync(message))
+				{
+					return (int) response.StatusCode;
 				}
 			}
 		}

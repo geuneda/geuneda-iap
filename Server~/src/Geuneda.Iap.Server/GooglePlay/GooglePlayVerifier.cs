@@ -145,6 +145,7 @@ namespace Geuneda.Iap.Server
 				OrderId = orderId,
 				Quantity = Math.Max(1, lineItem.ProductOfferDetails?.Quantity ?? 1),
 				PurchasedAt = ParseTime(purchase.PurchaseCompletionTime),
+				ObservedAt = _time.GetUtcNow(),
 				IsTest = purchase.TestPurchaseContext != null,
 				AccountToken = Blank(purchase.ObfuscatedExternalAccountId),
 				PaidAmount = paid.Amount,
@@ -177,35 +178,18 @@ namespace Geuneda.Iap.Server
 				return StoreVerification.Failed(StoreVerificationStatus.ProductMismatch, $"Subscription is not for {product.GooglePlayId}");
 			}
 
-			IapSubscriptionState state;
-
-			switch (subscription.SubscriptionState)
+			if (!TryMapSubscriptionState(subscription.SubscriptionState, out var state))
 			{
-				case "SUBSCRIPTION_STATE_ACTIVE":
-					state = IapSubscriptionState.Active;
-					break;
-				case "SUBSCRIPTION_STATE_CANCELED":
-					state = IapSubscriptionState.Canceled;
-					break;
-				case "SUBSCRIPTION_STATE_IN_GRACE_PERIOD":
-					state = IapSubscriptionState.GracePeriod;
-					break;
-				case "SUBSCRIPTION_STATE_ON_HOLD":
-					state = IapSubscriptionState.OnHold;
-					break;
-				case "SUBSCRIPTION_STATE_PAUSED":
-					state = IapSubscriptionState.Paused;
-					break;
-				case "SUBSCRIPTION_STATE_EXPIRED":
-					state = IapSubscriptionState.Expired;
-					break;
-				case "SUBSCRIPTION_STATE_PENDING":
-					return StoreVerification.Failed(StoreVerificationStatus.Pending, "Subscription payment is pending");
-				case "SUBSCRIPTION_STATE_PENDING_PURCHASE_CANCELED":
-					return StoreVerification.Failed(StoreVerificationStatus.Revoked, "Pending subscription purchase was cancelled");
-				default:
-					_logger.LogError("Google Play returned unknown subscription state {State} for {Product}", subscription.SubscriptionState, product);
-					return StoreVerification.Failed(StoreVerificationStatus.Unavailable, "Unknown subscription state");
+				switch (subscription.SubscriptionState)
+				{
+					case PendingSubscription:
+						return StoreVerification.Failed(StoreVerificationStatus.Pending, "Subscription payment is pending");
+					case PendingSubscriptionCanceled:
+						return StoreVerification.Failed(StoreVerificationStatus.Revoked, "Pending subscription purchase was cancelled");
+					default:
+						_logger.LogError("Google Play returned unknown subscription state {State} for {Product}", subscription.SubscriptionState, product);
+						return StoreVerification.Failed(StoreVerificationStatus.Unavailable, "Unknown subscription state");
+				}
 			}
 
 			var orderId = Blank(lineItem.LatestSuccessfulOrderId);
@@ -220,6 +204,8 @@ namespace Geuneda.Iap.Server
 				PurchasedAt = ParseTime(subscription.StartTime),
 				ExpiresAt = ParseTime(lineItem.ExpiryTime),
 				SubscriptionState = state,
+				AutoRenewing = lineItem.AutoRenewingPlan?.AutoRenewEnabled,
+				ObservedAt = _time.GetUtcNow(),
 				IsTest = subscription.TestPurchase != null,
 				AccountToken = Blank(subscription.ExternalAccountIdentifiers?.ObfuscatedExternalAccountId),
 				PaidAmount = paid.Amount,
@@ -247,6 +233,38 @@ namespace Geuneda.Iap.Server
 			}
 
 			return (units + (total.Nanos ?? 0) / 1_000_000_000m, total.CurrencyCode);
+		}
+
+		internal const string PendingSubscription = "SUBSCRIPTION_STATE_PENDING";
+		internal const string PendingSubscriptionCanceled = "SUBSCRIPTION_STATE_PENDING_PURCHASE_CANCELED";
+
+		/// <summary>결제가 끝난 구독의 상태를 옮깁니다. 결제 대기·결제 전 취소·모르는 값이면 false 입니다(서버 알림도 씀).</summary>
+		internal static bool TryMapSubscriptionState(string value, out IapSubscriptionState state)
+		{
+			switch (value)
+			{
+				case "SUBSCRIPTION_STATE_ACTIVE":
+					state = IapSubscriptionState.Active;
+					return true;
+				case "SUBSCRIPTION_STATE_CANCELED":
+					state = IapSubscriptionState.Canceled;
+					return true;
+				case "SUBSCRIPTION_STATE_IN_GRACE_PERIOD":
+					state = IapSubscriptionState.GracePeriod;
+					return true;
+				case "SUBSCRIPTION_STATE_ON_HOLD":
+					state = IapSubscriptionState.OnHold;
+					return true;
+				case "SUBSCRIPTION_STATE_PAUSED":
+					state = IapSubscriptionState.Paused;
+					return true;
+				case "SUBSCRIPTION_STATE_EXPIRED":
+					state = IapSubscriptionState.Expired;
+					return true;
+				default:
+					state = default;
+					return false;
+			}
 		}
 
 		/// <summary>확인됐다고 분명히 답한 결제만 빼고 확인 대상입니다(상태가 없거나 모르는 값이면 확인을 시도하고, 이미 확인됐으면 상태를 다시 읽어 끝냄).</summary>

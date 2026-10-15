@@ -4,7 +4,7 @@
 이 형식은 [Keep a Changelog](http://keepachangelog.com/en/1.0.0/)를 기반으로 하며,
 이 프로젝트는 [Semantic Versioning](http://semver.org/spec/v2.0.0.html)을 따릅니다.
 
-## [Unreleased]
+## [0.2.0] - 2026-10-15
 
 **New**:
 - 결제 서버 헬퍼 `Server~/src/Geuneda.Iap.Server`(ASP.NET Core, .NET 10): `AddGeunedaIap`(상품 목록 `IapServerProduct`) → `AddGooglePlay`·`AddAppStore`·`AddFakeStore`·`AddVerifier<T>`, `AddGrantor<T>`, `AddLedger<T>`·`AddInMemoryLedger`, 엔드포인트 `MapGeunedaIap(prefix, resolveAccountId)`(`POST {prefix}/purchases`), 직접 호출용 `IPurchaseRedeemer`
@@ -15,6 +15,9 @@
 - 선택 어셈블리 `Geuneda.Iap.Http`(com.geuneda.http 0.1.0 이상): `HttpPurchaseFulfiller<TGrant>`
 - 확인 대기와 재시도: 확인할 Google 결제(확인됨이라고 분명히 답하지 않은 것)는 지급과 같은 트랜잭션에서 `PurchaseRecord.AcknowledgementDueAt` 으로 기록하고, 확인 작업자(호스트 서비스)가 시작할 때와 `AcknowledgementRetryInterval` 마다 시각이 된 기록을 모두 다시 확인(실패는 다음 간격 뒤로 미룸, 이미 확인·소비·취소면 끝, 결제 뒤 3일이면 그만둠). 원장에 `FindDueAcknowledgementsAsync`·`MarkAcknowledgedAsync`·`DeferAcknowledgementAsync`
 - `IIapRedeemResponse`: 지급 결과 형식과 관계없이 서버 응답을 읽는 인터페이스
+- 서버 알림: `MapGeunedaIapGooglePlayNotifications`(Google Play 실시간 개발자 알림, Pub/Sub 푸시 OIDC 검증), `MapGeunedaIapAppStoreNotifications`(App Store Server Notifications V2, 알림·거래·갱신 정보 서명 검증, `AppStoreOptions.AppAppleId`), 게임이 구현하는 `IPurchaseNotificationHandler`(`OnRefundedAsync`, `OnRefundReversedAsync`, `OnSubscriptionChangedAsync`), `AddNotificationHandler<T>`
+- 환불은 원장의 누적 환불 수량(`PurchaseRecord.RefundedQuantity`, `IPurchaseLedger.UpdateRefundAsync` + `RefundUpdateMode`: App Store 이벤트 시각 순, Google 줄이지 않음)으로 한 번만 반영(중복·순서 뒤바뀐 알림, Google 일부 환불). 원장에 아직 없는 거래의 환불은 계정 없는 지급 전 환불 기록(`PurchaseRecord.IsGranted`)으로 남기고, 지급 요청이 환불 수량만큼 빼고 지급(`PurchaseGrant.Quantity`)하거나 모두 환불이면 닫음(환불 전 영수증 재제출 방지). 모두 환불된 거래가 다시 오면 지급 없이 닫음(`Revoked`)
+- 구독 상태 스냅숏 `SubscriptionUpdate`(Google 은 `subscriptionsv2` 재조회, App Store 는 알림 `status`·갱신 정보·`GracePeriodExpiresAt`, 계정은 원장(`FindByOriginalTransactionAsync`), 업그레이드는 연결 토큰의 계정). 원장의 `UpdateSubscriptionAsync` 가 구독마다 잠그고 관측 시각 순서로만 넘김(Google 은 잠금 안에서 조회). 계정 없는 갱신을 지급 때 게임이 연결하도록 `VerifiedPurchase.SubscriptionId`, `ObservedAt`, `AutoRenewing`. 모두 환불된 거래의 지급 요청은 계정만 기록해 환불 취소 때 돌려줄 수 있게 함
 
 **Changed**:
 - `PurchaseConfirmed`(매출 지점): 지급 결과가 결제 서버 응답(`IIapRedeemResponse`)이면 서버의 첫 지급(`Granted`)을 받은 기기가 거래를 닫을 때 한 번(스토어가 `AlreadyConfirmed` 여도, `AlreadyGranted` 면 `Confirmed` 여도 없음). 그 밖의 지급자는 전과 같이 스토어 `Confirmed` 때

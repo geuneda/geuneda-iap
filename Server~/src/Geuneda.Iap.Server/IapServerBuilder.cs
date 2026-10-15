@@ -42,6 +42,7 @@ namespace Geuneda.Iap.Server
 			});
 			Services.TryAddSingleton<IGooglePlayAccessTokenSource, GoogleCredentialAccessTokenSource>();
 			Services.TryAddSingleton<GooglePlayApi>();
+			Services.TryAddSingleton<GooglePubSubTokenVerifier>();
 			// 지급 뒤 확인을 못 한 거래(확인 실패, 그 사이 서버 종료)를 원장에서 찾아 다시 확인한다
 			Services.TryAddEnumerable(ServiceDescriptor.Singleton<IHostedService, PendingAcknowledgementWorker>());
 			return AddVerifier<GooglePlayVerifier>();
@@ -80,6 +81,17 @@ namespace Geuneda.Iap.Server
 		public IapServerBuilder AddGrantor<T>(ServiceLifetime lifetime = ServiceLifetime.Scoped) where T : class, IPurchaseGrantor
 		{
 			Services.Replace(ServiceDescriptor.Describe(typeof(IPurchaseGrantor), typeof(T), lifetime));
+			return this;
+		}
+
+		/// <summary>
+		/// 서버 알림 처리기를 붙입니다(<see cref="IapServerExtensions.MapGeunedaIapGooglePlayNotifications"/>, <see cref="IapServerExtensions.MapGeunedaIapAppStoreNotifications"/>).
+		/// 원장과 같은 DB 트랜잭션을 쓰도록 기본 수명은 요청 범위입니다.
+		/// </summary>
+		public IapServerBuilder AddNotificationHandler<T>(ServiceLifetime lifetime = ServiceLifetime.Scoped) where T : class, IPurchaseNotificationHandler
+		{
+			// 알림 처리 객체는 쓰는 스토어의 서비스에만 의존하도록 요청 때 만든다(등록하면 한 스토어만 쓰는 앱의 DI 검사가 실패함)
+			Services.Replace(ServiceDescriptor.Describe(typeof(IPurchaseNotificationHandler), typeof(T), lifetime));
 			return this;
 		}
 

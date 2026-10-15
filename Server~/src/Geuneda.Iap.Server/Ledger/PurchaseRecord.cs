@@ -14,8 +14,11 @@ namespace Geuneda.Iap.Server
 		/// <summary>스토어 거래 ID(Google 은 구매 토큰)</summary>
 		public required string TransactionId { get; init; }
 
-		/// <summary>지급받은 계정</summary>
+		/// <summary>지급받은 계정. 지급 요청 전에 환불 알림이 와서 남긴 지급 전 환불 기록이면 null 입니다(<see cref="IsGranted"/>)</summary>
 		public required string AccountId { get; init; }
+
+		/// <summary>지급한 기록인지. false 면 지급 요청 전에 온 환불을 남긴 기록이라, 지급 요청이 오면 환불 수량만큼 빼고 지급하거나(모두 환불이면) 닫습니다</summary>
+		public bool IsGranted => AccountId != null;
 
 		/// <summary>게임 상품 ID</summary>
 		public required string ProductId { get; init; }
@@ -50,5 +53,14 @@ namespace Geuneda.Iap.Server
 		/// 서버가 그 사이 죽어도 확인 작업자가 다시 시도합니다(DB 에서는 이 열에 색인)
 		/// </summary>
 		public DateTimeOffset? AcknowledgementDueAt { get; init; }
+
+		/// <summary>스토어가 환불한 누적 수량(0 이면 환불 없음). 서버 알림이 <see cref="IPurchaseLedger.UpdateRefundAsync"/> 로 바꿉니다</summary>
+		public int RefundedQuantity { get; init; }
+
+		/// <summary>마지막 환불 변경의 스토어 이벤트 시각. 이보다 오래된 알림은 반영하지 않습니다. 없으면 null</summary>
+		public DateTimeOffset? RefundedAt { get; init; }
+
+		/// <summary>모든 수량이 환불됐는지. 이 거래가 다시 오면 지급 없이 닫습니다(<see cref="IapRedeemCodes.Revoked"/>)</summary>
+		public bool IsFullyRefunded => RefundedQuantity >= Math.Max(1, Quantity);
 	}
 }

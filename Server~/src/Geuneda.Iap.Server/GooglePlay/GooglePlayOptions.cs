@@ -35,5 +35,17 @@ namespace Geuneda.Iap.Server
 
 		/// <summary>Android Publisher API 주소. 테스트에서만 바꿉니다</summary>
 		public Uri ApiBaseAddress { get; set; } = new Uri("https://androidpublisher.googleapis.com/androidpublisher/v3/");
+
+		/// <summary>
+		/// 실시간 개발자 알림(RTDN) Pub/Sub 푸시 구독의 인증 대상(audience). 푸시 구독의 '인증 사용 설정'에서 정한 값(보통 푸시 엔드포인트 주소)입니다.
+		/// <c>MapGeunedaIapGooglePlayNotifications</c> 를 쓰면 필수입니다
+		/// </summary>
+		public string NotificationAudience { get; set; }
+
+		/// <summary>Pub/Sub 푸시 구독이 토큰에 서명하는 서비스 계정 이메일. <c>MapGeunedaIapGooglePlayNotifications</c> 를 쓰면 필수입니다</summary>
+		public string NotificationServiceAccountEmail { get; set; }
+
+		/// <summary>푸시 토큰 서명 키(JWKS) 주소. null 이면 Google 기본값입니다. 테스트에서만 바꿉니다</summary>
+		public Uri NotificationCertificatesUrl { get; set; }
 	}
 }

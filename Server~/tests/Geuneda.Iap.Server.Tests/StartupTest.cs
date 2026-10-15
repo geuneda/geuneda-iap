@@ -13,10 +13,12 @@ namespace Geuneda.Iap.Server.Tests
 	/// <summary>설정 오류가 첫 요청이 아니라 시작할 때(<c>MapGeunedaIap</c>) 드러나는지 확인합니다.</summary>
 	public sealed class StartupTest
 	{
-		private static WebApplication Build(Action<IapServerBuilder> build, Action<IapServerOptions> configure = null, string environment = "Development")
+		private static WebApplication Build(Action<IapServerBuilder> build, Action<IapServerOptions> configure = null, string environment = "Development",
+			Action<IServiceCollection> services = null)
 		{
 			var builder = WebApplication.CreateSlimBuilder(new WebApplicationOptions { EnvironmentName = environment });
 			builder.Logging.ClearProviders();
+			services?.Invoke(builder.Services);
 			build(builder.Services.AddGeunedaIap(configure ?? (options => options.Products.Add(new IapServerProduct("gem_100", IapProductType.Consumable)))));
 			return builder.Build();
 		}
@@ -102,6 +104,26 @@ namespace Geuneda.Iap.Server.Tests
 			}).AddGrantor<TestGrantor>().AddInMemoryLedger());
 
 			Assert.Throws<InvalidOperationException>(() => Map(app));
+		}
+
+		[Fact]
+		public void Notification_endpoints_need_their_store_handler_and_push_settings()
+		{
+			var noGoogle = Build(iap => iap.AddFakeStore().AddGrantor<TestGrantor>().AddInMemoryLedger().AddNotificationHandler<TestNotificationHandler>());
+			var noHandler = Build(iap => iap.AddGooglePlay(options =>
+			{
+				options.PackageName = "com.test.game";
+				options.NotificationAudience = "aud";
+				options.NotificationServiceAccountEmail = "push@test";
+			}).AddGrantor<TestGrantor>().AddInMemoryLedger(), services: services => services.AddSingleton<IGooglePlayAccessTokenSource>(new FakeTokenSource()));
+			var noAudience = Build(iap => iap.AddGooglePlay(options => options.PackageName = "com.test.game").AddGrantor<TestGrantor>().AddInMemoryLedger()
+				.AddNotificationHandler<TestNotificationHandler>(), services: services => services.AddSingleton<IGooglePlayAccessTokenSource>(new FakeTokenSource()));
+			var noAppStore = Build(iap => iap.AddFakeStore().AddGrantor<TestGrantor>().AddInMemoryLedger().AddNotificationHandler<TestNotificationHandler>());
+
+			Assert.Contains("AddGooglePlay", Assert.Throws<InvalidOperationException>(() => noGoogle.MapGeunedaIapGooglePlayNotifications("/iap")).Message);
+			Assert.Contains("handler", Assert.Throws<InvalidOperationException>(() => noHandler.MapGeunedaIapGooglePlayNotifications("/iap")).Message);
+			Assert.Contains("NotificationAudience", Assert.Throws<InvalidOperationException>(() => noAudience.MapGeunedaIapGooglePlayNotifications("/iap")).Message);
+			Assert.Contains("AddAppStore", Assert.Throws<InvalidOperationException>(() => noAppStore.MapGeunedaIapAppStoreNotifications("/iap")).Message);
 		}
 
 		[Fact]

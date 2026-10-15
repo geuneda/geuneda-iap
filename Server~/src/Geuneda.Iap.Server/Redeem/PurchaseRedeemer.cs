@@ -66,7 +66,7 @@ namespace Geuneda.Iap.Server
 			var ledgerStore = verifier.LedgerStore;
 			var existing = await _ledger.FindAsync(ledgerStore, request.TransactionId, cancellationToken);
 
-			if (existing != null)
+			if (existing != null && existing.IsGranted)
 			{
 				return FromRecord(existing, accountId);
 			}
@@ -112,11 +112,21 @@ namespace Geuneda.Iap.Server
 				AcknowledgementDueAt = purchase.RequiresAcknowledgement ? redeemedAt : null
 			};
 
-			var grant = new PurchaseGrant(accountId, product, purchase, request.Payload);
 			var granted = default(GrantResult);
-			var ledgerResult = await _ledger.RedeemAsync(record, async token =>
+			var refundedBeforeGrant = false;
+			var ledgerResult = await _ledger.RedeemAsync(record, async (preGrantRefund, token) =>
 			{
-				granted = await _grantor.GrantAsync(grant, token);
+				// 지급 요청보다 환불 알림이 먼저 왔으면 그 수량만큼 빼고 지급한다. 모두 환불이면 지급자를 부르지 않고 계정만 기록한다
+				// (환불 전 영수증을 다시 내도 지급되지 않고, 나중에 환불이 취소되면 OnRefundReversedAsync 로 이 계정에 돌려줄 수 있게)
+				var refunded = preGrantRefund == null ? 0 : Math.Min(preGrantRefund.RefundedQuantity, purchase.Quantity);
+
+				if (refunded >= purchase.Quantity)
+				{
+					refundedBeforeGrant = true;
+					return LedgerGrant.Granted(null);
+				}
+
+				granted = await _grantor.GrantAsync(new PurchaseGrant(accountId, product, purchase, request.Payload, purchase.Quantity - refunded), token);
 
 				switch (granted.Status)
 				{
@@ -135,6 +145,11 @@ namespace Geuneda.Iap.Server
 				case LedgerRedeemOutcome.Duplicate:
 					// 같은 거래의 다른 요청이 먼저 지급했다
 					return FromRecord(ledgerResult.Record, accountId);
+				case LedgerRedeemOutcome.Recorded when refundedBeforeGrant:
+					// 확인할 결제도 아니다(환불됨). 확인 대기를 지운다
+					_logger.LogWarning("{Purchase} of account {AccountId} was refunded before its grant; recorded the account without granting", purchase, accountId);
+					await _ledger.MarkAcknowledgedAsync(ledgerResult.Record.Store, ledgerResult.Record.TransactionId, CancellationToken.None);
+					return Response(ledgerResult.Record, IapRedeemStatus.AlreadyGranted, IapRedeemCodes.Revoked, "Refunded before the grant", null);
 				case LedgerRedeemOutcome.NotGranted:
 					return FromNotGranted(granted, request, accountId);
 				case LedgerRedeemOutcome.Recorded:
@@ -146,6 +161,7 @@ namespace Geuneda.Iap.Server
 						await _ledger.MarkAcknowledgedAsync(ledgerResult.Record.Store, ledgerResult.Record.TransactionId, CancellationToken.None);
 					}
 
+
 					return Response(ledgerResult.Record, IapRedeemStatus.Granted, IapRedeemCodes.None, null, granted.Response);
 				default:
 					throw new InvalidOperationException($"{_ledger.GetType().Name} returned undefined outcome {(int) ledgerResult.Outcome}");
@@ -154,6 +170,14 @@ namespace Geuneda.Iap.Server
 
 		private IapRedeemResponse<object> FromRecord(PurchaseRecord record, string accountId)
 		{
+			if (record.IsFullyRefunded)
+			{
+				// 지급 뒤 환불된 거래가 다시 왔다(클라이언트가 아직 닫지 못함). 다시 지급하지 않고 닫게 한다
+				_logger.LogInformation("{Store} transaction {TransactionId} of account {AccountId} was refunded after the grant", record.Store, record.TransactionId,
+					accountId);
+				return Response(record, IapRedeemStatus.AlreadyGranted, IapRedeemCodes.Revoked, "Refunded", null);
+			}
+
 			if (record.AccountId != accountId)
 			{
 				// 레퍼런스의 '남의 영수증'과 같이 지급하지 않고 거래를 닫게 한다(같은 거래가 계속 다시 오지 않게)

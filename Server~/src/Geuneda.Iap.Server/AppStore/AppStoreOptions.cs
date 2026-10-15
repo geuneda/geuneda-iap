@@ -23,6 +23,12 @@ namespace Geuneda.Iap.Server
 		/// </summary>
 		public bool OnlineChecks { get; set; } = true;
 
+		/// <summary>
+		/// App Store 의 앱 ID(App Store Connect 의 Apple ID, 숫자). 있으면 운영(Production) 서버 알림의 <c>appAppleId</c> 가 이 값이어야 합니다(Apple 공식 라이브러리와 같은 검사).
+		/// 서버 알림(<c>MapGeunedaIapAppStoreNotifications</c>)을 쓰면 넣으세요. 없으면 null
+		/// </summary>
+		public long? AppAppleId { get; set; }
+
 		/// <summary>신뢰할 루트 인증서(DER). 비어 있으면 <see cref="AppleRootCertificates.AppleRootCaG3"/> 하나입니다. 테스트에서는 자체 루트를 넣습니다</summary>
 		public List<byte[]> RootCertificates { get; } = new List<byte[]>();
 	}

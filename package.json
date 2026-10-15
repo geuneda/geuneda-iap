@@ -2,10 +2,10 @@
   "name": "com.geuneda.iap",
   "displayName": "Geuneda IAP",
   "author": "geuneda",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "unity": "2021.3",
   "license": "MIT",
-  "description": "인앱 결제 서비스입니다. 결제한 주문을 게임의 지급자(서버 지급)가 확인한 뒤에만 스토어 거래를 닫아, 결제했는데 지급되지 않은 주문이 스토어에 남아 다시 처리되게 합니다. 구매·복원 상호 배제, 주문 하나씩 지급·확정하는 큐, 지급 실패·시간 초과의 백오프 재시도, 초기화·포그라운드 복귀·명시적 복구 때 스토어 재조회, 늦게 끝난 결제의 뒤 지급, 중복 거래 복구, 확정만 다시 시도를 합니다. 스토어 SDK 는 어댑터 패키지(com.geuneda.iap.unity: Unity IAP)로 붙이고, analytics 가 있으면 확정한 구매를 매출 표준 이벤트로 기록합니다.",
+  "description": "인앱 결제 서비스입니다. 결제한 주문을 게임의 지급자(서버 지급)가 확인한 뒤에만 스토어 거래를 닫아, 결제했는데 지급되지 않은 주문이 스토어에 남아 다시 처리되게 합니다. 구매·복원 상호 배제, 주문 하나씩 지급·확정하는 큐, 지급 실패·시간 초과의 백오프 재시도, 초기화·포그라운드 복귀·명시적 복구 때 스토어 재조회, 늦게 끝난 결제의 뒤 지급, 중복 거래 복구, 확정만 다시 시도를 합니다. 스토어 SDK 는 어댑터 패키지(com.geuneda.iap.unity: Unity IAP)로 붙이고, analytics 가 있으면 확정한 구매를 매출 표준 이벤트로, http 가 있으면 결제 서버 지급자를 씁니다. Server~ 에 ASP.NET Core 결제 서버(Google Play·App Store 영수증 검증, 영수증 유일성 원장, 지급 엔드포인트, 환불·구독 서버 알림)가 있습니다.",
   "type": "library",
   "hideInEditor": false,
   "dependencies": {

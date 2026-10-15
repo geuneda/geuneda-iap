@@ -172,7 +172,7 @@ namespace Geuneda.Iap.Server.Tests
 					Store = IapStoreNames.GooglePlay, TransactionId = token, AccountId = "account-1", ProductId = "gem_100", StoreProductId = "gem_100",
 					PurchasedAt = IapTestServer.Now, RedeemedAt = IapTestServer.Now, AcknowledgementDueAt = IapTestServer.Now.AddMinutes(-count + i)
 				};
-				await server.Ledger.RedeemAsync(record, _ => Task.FromResult(LedgerGrant.Granted(null)), CancellationToken.None);
+				await server.Ledger.RedeemAsync(record, (_, _) => Task.FromResult(LedgerGrant.Granted(null)), CancellationToken.None);
 			}
 
 			Assert.Equal(1, await Worker(server).RunOnceAsync(CancellationToken.None));
@@ -254,7 +254,8 @@ namespace Geuneda.Iap.Server.Tests
 				return _inner.FindAsync(store, transactionId, cancellationToken);
 			}
 
-			public Task<LedgerRedeemResult> RedeemAsync(PurchaseRecord record, Func<CancellationToken, Task<LedgerGrant>> grant, CancellationToken cancellationToken)
+			public Task<LedgerRedeemResult> RedeemAsync(PurchaseRecord record, Func<PurchaseRecord, CancellationToken, Task<LedgerGrant>> grant,
+				CancellationToken cancellationToken)
 			{
 				return _inner.RedeemAsync(record, grant, cancellationToken);
 			}
@@ -275,6 +276,24 @@ namespace Geuneda.Iap.Server.Tests
 			public Task DeferAcknowledgementAsync(string store, string transactionId, DateTimeOffset dueAt, CancellationToken cancellationToken)
 			{
 				return _inner.DeferAcknowledgementAsync(store, transactionId, dueAt, cancellationToken);
+			}
+
+			public Task<LedgerRefundResult> UpdateRefundAsync(RefundChange change, Func<PurchaseRecord, int, CancellationToken, Task> apply,
+				CancellationToken cancellationToken)
+			{
+				return _inner.UpdateRefundAsync(change, apply, cancellationToken);
+			}
+
+			public Task<SubscriptionUpdateOutcome> UpdateSubscriptionAsync(string store, string subscriptionId,
+				Func<SubscriptionUpdate, CancellationToken, Task<SubscriptionUpdate>> next, Func<SubscriptionUpdate, CancellationToken, Task> deliver,
+				CancellationToken cancellationToken)
+			{
+				return _inner.UpdateSubscriptionAsync(store, subscriptionId, next, deliver, cancellationToken);
+			}
+
+			public Task<PurchaseRecord> FindByOriginalTransactionAsync(string store, string originalTransactionId, CancellationToken cancellationToken)
+			{
+				return _inner.FindByOriginalTransactionAsync(store, originalTransactionId, cancellationToken);
 			}
 		}
 

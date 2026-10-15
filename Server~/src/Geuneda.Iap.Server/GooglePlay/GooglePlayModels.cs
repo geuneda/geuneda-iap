@@ -26,6 +26,9 @@ namespace Geuneda.Iap.Server
 	internal sealed class GoogleProductOfferDetails
 	{
 		public int? Quantity { get; set; }
+
+		/// <summary>아직 환불할 수 있는 수량(일부 환불 뒤 줄어듦)</summary>
+		public int? RefundableQuantity { get; set; }
 	}
 
 	internal sealed class GooglePurchaseStateContext
