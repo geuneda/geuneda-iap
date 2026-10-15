@@ -1,0 +1,26 @@
+{
+    "name": "Geuneda.Iap.Analytics",
+    "rootNamespace": "Geuneda.Iap.Analytics",
+    "references": [
+        "Geuneda.Iap",
+        "Geuneda.Analytics",
+        "Geuneda.Core"
+    ],
+    "includePlatforms": [],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": [
+        "GEUNEDA_IAP_ANALYTICS"
+    ],
+    "versionDefines": [
+        {
+            "name": "com.geuneda.analytics",
+            "expression": "0.2.0",
+            "define": "GEUNEDA_IAP_ANALYTICS"
+        }
+    ],
+    "noEngineReferences": false
+}
